@@ -1,0 +1,14 @@
+node_modules/
+dist/
+bin/
+obj/
+*.test
+coverage.out
+.DS_Store
+samples/*.csv
+
+# Local, private material: never committed.
+specs/
+CLAUDE.md
+.claude/
+docs/DECISIONS.md

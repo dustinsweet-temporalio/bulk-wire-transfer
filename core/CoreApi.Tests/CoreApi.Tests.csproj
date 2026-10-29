@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" Version="4.0.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\CoreApi\CoreApi.csproj" />
+    <!-- The TVP test checks Tvp.cs column order against the SQL type definition itself. -->
+    <None Include="..\..\sql\02-types.sql" Link="sql\02-types.sql" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

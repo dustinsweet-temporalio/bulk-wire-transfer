@@ -1,0 +1,28 @@
+{
+  "name": "bulkwire-portal",
+  "private": true,
+  "version": "1.0.0",
+  "description": "FI-branded commercial banking portal for the bulk wire reference implementation",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fontsource/source-sans-3": "5.3.1",
+    "@tanstack/react-query": "5.105.0",
+    "lucide-react": "1.63.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-router": "8.5.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "typescript": "7.0.2",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}

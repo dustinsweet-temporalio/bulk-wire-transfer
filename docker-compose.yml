@@ -1,0 +1,401 @@
+# Bulk wire reference implementation: the whole demo stack, one service per container.
+#
+# Topology (see docs/ARCHITECTURE.md):
+#   - Temporal dev server (namespace "bulkwire") + one-shot init jobs           profile local-temporal
+#   - one Core per FI: its own SQL Server, its own one-shot schema init, its own .NET API
+#   - exactly one claim-check backend, chosen by CLAIMCHECK_BACKEND + profile    claimcheck-{redis,s3,gcs}
+#   - Go: two identical workers (build v1), bulkwire-service, codec-server, control-service (DEMO-ONLY)
+#   - nginx gateway: Lakeshore portal :3001, Prairie portal :3002, Control Center :3100
+#
+# WHY no restart policies: the Control Center kills, stops, and pauses containers to demonstrate failures.
+# A restart policy would silently undo a "kill" and misrepresent what Temporal is doing. Startup ordering
+# is expressed with depends_on conditions instead.
+#
+# Host ports bind to 127.0.0.1 only: control-service holds the Docker socket, so nothing here should be
+# reachable from the network.
+
+name: ${COMPOSE_PROJECT_NAME:-bulkwire}
+
+# Environment shared by every Go binary. Values are interpolated (not env_file) so that
+# `make up BACKEND=s3` overrides CLAIMCHECK_BACKEND from the shell for this invocation.
+x-go-env: &go-env
+  TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS}
+  TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE}
+  TEMPORAL_API_KEY: ${TEMPORAL_API_KEY:-}
+  TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE}
+  TEMPORAL_UI_URL: ${TEMPORAL_UI_URL}
+  WORKER_DEPLOYMENT_NAME: ${WORKER_DEPLOYMENT_NAME}
+  WORKER_VERSIONING_ENABLED: ${WORKER_VERSIONING_ENABLED}
+  CODEC_KEYRING_PATH: ${CODEC_KEYRING_PATH}
+  CODEC_CORS_ORIGINS: ${CODEC_CORS_ORIGINS}
+  AUTH_SIGNING_KEY: ${AUTH_SIGNING_KEY}
+  DEMO_PASSWORD: ${DEMO_PASSWORD}
+  CLAIMCHECK_BACKEND: ${CLAIMCHECK_BACKEND}
+  CLAIMCHECK_TTL: ${CLAIMCHECK_TTL}
+  CLAIMCHECK_PAGE_SIZE: ${CLAIMCHECK_PAGE_SIZE}
+  REDIS_ADDR: ${REDIS_ADDR}
+  S3_ENDPOINT: ${S3_ENDPOINT}
+  S3_BUCKET: ${S3_BUCKET}
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+  S3_SECRET_KEY: ${S3_SECRET_KEY}
+  GCS_ENDPOINT: ${GCS_ENDPOINT}
+  GCS_BUCKET: ${GCS_BUCKET}
+  DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE}
+  DEFAULT_CONCURRENCY: ${DEFAULT_CONCURRENCY}
+  MAX_ROWS: ${MAX_ROWS}
+  APPROVAL_WINDOW: ${APPROVAL_WINDOW}
+  CORE_RETRY_BUDGET: ${CORE_RETRY_BUDGET}
+  CORE_RETRY_MAX_INTERVAL: ${CORE_RETRY_MAX_INTERVAL}
+  CORE_RETRY_ALERT_THRESHOLD: ${CORE_RETRY_ALERT_THRESHOLD}
+  CORE_ENDPOINTS: ${CORE_ENDPOINTS}
+  INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+  BULKWIRE_INTERNAL_URL: ${BULKWIRE_INTERNAL_URL}
+
+# Claim-check backends are each in their own profile; only the active one exists. `required: false`
+# lets Go services depend on "whichever backend is running".
+x-claimcheck-deps: &claimcheck-deps
+  redis: { condition: service_healthy, required: false }
+  rustfs-init: { condition: service_completed_successfully, required: false }
+  fake-gcs: { condition: service_started, required: false }
+
+x-temporal-image: &temporal-image temporalio/temporal:1.9.1
+
+x-mssql: &mssql
+  image: mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04
+  # SQL Server for Linux ships amd64 only; Apple Silicon runs it under Rosetta.
+  platform: linux/amd64
+  environment:
+    ACCEPT_EULA: "Y"
+    MSSQL_PID: Developer
+    MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+    MSSQL_MEMORY_LIMIT_MB: "1536"
+  healthcheck:
+    test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b -o /dev/null"]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+    start_period: 20s
+
+x-sqlinit: &sqlinit
+  image: mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04
+  platform: linux/amd64
+  entrypoint: ["/bin/bash", "/sql/init.sh"]
+  volumes:
+    - ./sql:/sql:ro
+
+x-core: &core
+  build:
+    context: ./core
+    dockerfile: Dockerfile
+  image: bulkwire/core-api:local
+  environment: &core-env
+    CORE_SQL_COMMAND_TIMEOUT_SECONDS: ${CORE_SQL_COMMAND_TIMEOUT_SECONDS}
+    CORE_DUAL_CONTROL_THRESHOLD_CENTS: ${CORE_DUAL_CONTROL_THRESHOLD_CENTS}
+    CORE_DEMO_TAC: ${CORE_DEMO_TAC}
+    CORE_SIMULATED_LATENCY_MS: ${CORE_SIMULATED_LATENCY_MS}
+    INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+    AUTH_SIGNING_KEY: ${AUTH_SIGNING_KEY}
+    BULKWIRE_INTERNAL_URL: ${BULKWIRE_INTERNAL_URL}
+    ASPNETCORE_HTTP_PORTS: "8080"
+
+x-worker: &worker
+  build:
+    context: .
+    dockerfile: docker/go.Dockerfile
+    target: worker
+  image: bulkwire/worker:v1
+  environment: &worker-env
+    <<: *go-env
+    WORKER_BUILD_ID: v1
+    METRICS_PORT: "9464"
+  volumes:
+    - ./config:/config:ro
+  depends_on: &worker-deps
+    <<: *claimcheck-deps
+    temporal-init: { condition: service_completed_successfully, required: false }
+
+services:
+  # ---------------------------------------------------------------- Temporal (profile local-temporal)
+  temporal:
+    image: *temporal-image
+    profiles: [local-temporal]
+    # WHY single partition: Fairness and per-key rate limits are enforced per task-queue partition; one
+    # partition makes the per-FI limit exact for the demo. On Temporal Cloud, single-partition queues
+    # require a support request.
+    command:
+      - server
+      - start-dev
+      - --ip=0.0.0.0
+      - --ui-ip=0.0.0.0
+      # The image runs as uid 1000 ("temporal"); its home directory is the writable mount point for the
+      # SQLite file (the image cannot write /data). A restart of this container keeps every workflow history.
+      - --db-filename=/home/temporal/temporal.db
+      - --namespace=bulkwire
+      - --dynamic-config-value=matching.enableFairness=true
+      - --dynamic-config-value=matching.numTaskqueueReadPartitions=1
+      - --dynamic-config-value=matching.numTaskqueueWritePartitions=1
+      # The browser (not the server) calls the Codec Server, so this is a host URL.
+      - --ui-codec-endpoint=http://localhost:8089
+    ports:
+      - "127.0.0.1:7233:7233"
+      - "127.0.0.1:8233:8233"
+    volumes:
+      - temporal-data:/home/temporal
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  temporal-init:
+    image: *temporal-image
+    profiles: [local-temporal]
+    entrypoint: ["/bin/sh", "/scripts/temporal-init.sh"]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: bulkwire
+    volumes:
+      - ./scripts:/scripts:ro
+    depends_on:
+      temporal: { condition: service_healthy }
+
+  worker-activate:
+    image: *temporal-image
+    profiles: [local-temporal]
+    entrypoint: ["/bin/sh", "/scripts/worker-activate.sh"]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: bulkwire
+      WORKER_DEPLOYMENT_NAME: ${WORKER_DEPLOYMENT_NAME}
+      WORKER_BUILD_ID: ${WORKER_BUILD_ID}
+    volumes:
+      - ./scripts:/scripts:ro
+    depends_on:
+      worker-a: { condition: service_started }
+      worker-b: { condition: service_started }
+
+  # ---------------------------------------------------------------- Core: one SQL Server + one API per FI
+  sql-lakeshore:
+    <<: *mssql
+    ports: ["127.0.0.1:14331:1433"]
+    volumes: [sql-lakeshore-data:/var/opt/mssql]
+
+  sql-prairie:
+    <<: *mssql
+    ports: ["127.0.0.1:14332:1433"]
+    volumes: [sql-prairie-data:/var/opt/mssql]
+
+  sqlinit-lakeshore:
+    <<: *sqlinit
+    command: ["lakeshore"]
+    environment:
+      SQL_HOST: sql-lakeshore
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+    depends_on:
+      sql-lakeshore: { condition: service_healthy }
+
+  sqlinit-prairie:
+    <<: *sqlinit
+    command: ["prairie"]
+    environment:
+      SQL_HOST: sql-prairie
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+    depends_on:
+      sql-prairie: { condition: service_healthy }
+
+  core-lakeshore:
+    <<: *core
+    environment:
+      <<: *core-env
+      FI_ID: lakeshore
+      # Each Core connects only to its own FI's SQL Server (tenant isolation).
+      CORE_CONNECTION_STRING: "Server=sql-lakeshore,1433;Database=Core_lakeshore;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True;Application Name=core-lakeshore"
+    depends_on:
+      sqlinit-lakeshore: { condition: service_completed_successfully }
+
+  core-prairie:
+    <<: *core
+    environment:
+      <<: *core-env
+      FI_ID: prairie
+      CORE_CONNECTION_STRING: "Server=sql-prairie,1433;Database=Core_prairie;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True;Application Name=core-prairie"
+    depends_on:
+      sqlinit-prairie: { condition: service_completed_successfully }
+
+  # ---------------------------------------------------------------- Claim check (exactly one profile)
+  redis:
+    image: redis:8.10.3-alpine
+    profiles: [claimcheck-redis]
+    # WHY AOF + noeviction: claim-check data must survive a restart and must never be silently evicted
+    # mid-draft. A cache-grade Redis (no persistence, LRU eviction) is the wrong configuration for this role.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # RustFS is an S3-compatible server standing in for MinIO, which no longer publishes container images.
+  # The Go code speaks plain S3 through aws-sdk-go-v2, exactly as it would to AWS.
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    profiles: [claimcheck-s3]
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY}
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes: [rustfs-data:/data]
+
+  # Creates the bucket and a 7-day expiry lifecycle rule with the standard AWS CLI (the same commands
+  # work against AWS S3). PRODUCTION NOTE: on AWS, also enable SSE-KMS on the bucket.
+  rustfs-init:
+    image: amazon/aws-cli:2.39.1
+    profiles: [claimcheck-s3]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        E="--endpoint-url $${S3_ENDPOINT}"
+        for i in $$(seq 1 60); do aws $$E s3api list-buckets >/dev/null 2>&1 && break; sleep 1; done
+        aws $$E s3api head-bucket --bucket "$${S3_BUCKET}" 2>/dev/null || aws $$E s3api create-bucket --bucket "$${S3_BUCKET}"
+        aws $$E s3api put-bucket-lifecycle-configuration --bucket "$${S3_BUCKET}" --lifecycle-configuration \
+          '{"Rules":[{"ID":"expire-staged-7d","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":7}}]}'
+        aws $$E s3api get-bucket-lifecycle-configuration --bucket "$${S3_BUCKET}"
+    environment:
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      AWS_DEFAULT_REGION: us-east-1
+    depends_on:
+      rustfs: { condition: service_started }
+
+  # PRODUCTION NOTE: fake-gcs-server does not enforce lifecycle rules; on GCP configure Object Lifecycle
+  # Management (delete after 7 days) and CMEK as required.
+  fake-gcs:
+    image: fsouza/fake-gcs-server:1.56.1
+    profiles: [claimcheck-gcs]
+    command: ["-scheme", "http", "-port", "4443", "-public-host", "fake-gcs:4443", "-backend", "filesystem", "-filesystem-root", "/storage"]
+    ports: ["127.0.0.1:4443:4443"]
+    # The bucket is pre-created from an empty directory under the initial-data root (/data/<bucket>).
+    tmpfs:
+      - /data/bulkwire-claimcheck
+    volumes: [fake-gcs-data:/storage]
+
+  # ---------------------------------------------------------------- Workers (build v1)
+  worker-a:
+    <<: *worker
+    ports: ["127.0.0.1:9464:9464"]
+
+  worker-b:
+    <<: *worker
+    ports: ["127.0.0.1:9465:9464"]
+
+  # Versioning demo (profile versioning-demo): created but not started by `make up`; the Control Center
+  # starts them. worker-v2 is built with a deliberate, compile-time workflow bug; worker-v3 is the fix.
+  worker-v2:
+    <<: *worker
+    profiles: [versioning-demo]
+    build:
+      context: .
+      dockerfile: docker/go.Dockerfile
+      target: worker
+      args:
+        DEMO_BUG: panic-before-authorize
+    image: bulkwire/worker:v2
+    environment:
+      <<: *worker-env
+      WORKER_BUILD_ID: v2
+
+  worker-v3:
+    <<: *worker
+    profiles: [versioning-demo]
+    image: bulkwire/worker:v3
+    environment:
+      <<: *worker-env
+      WORKER_BUILD_ID: v3
+
+  # ---------------------------------------------------------------- Go services
+  bulkwire-service:
+    build:
+      context: .
+      dockerfile: docker/go.Dockerfile
+      target: bulkwire-service
+    image: bulkwire/bulkwire-service:local
+    environment:
+      <<: *go-env
+    volumes:
+      - ./config:/config:ro
+    depends_on:
+      <<: *claimcheck-deps
+      worker-activate: { condition: service_completed_successfully, required: false }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  codec-server:
+    build:
+      context: .
+      dockerfile: docker/go.Dockerfile
+      target: codec-server
+    image: bulkwire/codec-server:local
+    environment:
+      <<: *go-env
+    ports: ["127.0.0.1:8089:8089"]
+    volumes:
+      - ./config:/config:ro
+
+  # DEMO-ONLY: failure injection, chaos, load, fairness limits, key rotation, reset (see docs/FAILURE-CATALOG.md).
+  # It mounts the Docker socket, so it is reachable only through the gateway on localhost:3100.
+  control-service:
+    build:
+      context: .
+      dockerfile: docker/go.Dockerfile
+      target: control-service
+    image: bulkwire/control-service:local
+    environment:
+      <<: *go-env
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME}
+      CHAOS_ALLOWLIST: ${CHAOS_ALLOWLIST}
+      WORKER_METRICS_URLS: worker-a=http://worker-a:9464/metrics,worker-b=http://worker-b:9464/metrics
+    # The Docker socket is root:root 0660 inside Docker Desktop's VM; the non-root user (uid 10001) joins group 0
+    # to use it. DEMO-ONLY: never grant this to a production service.
+    group_add: ["0"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Read-write: key rotation writes a new keyring (temp file + rename), so the directory is mounted,
+      # not the single file (a rename cannot replace a bind-mounted file).
+      - ./config:/config
+    depends_on:
+      bulkwire-service: { condition: service_started }
+
+  # ---------------------------------------------------------------- Gateway (portals + Control Center)
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    image: bulkwire/gateway:local
+    ports:
+      - "127.0.0.1:3001:3001"
+      - "127.0.0.1:3002:3002"
+      - "127.0.0.1:3100:3100"
+    depends_on:
+      bulkwire-service: { condition: service_started }
+      core-lakeshore: { condition: service_started }
+      core-prairie: { condition: service_started }
+      control-service: { condition: service_started }
+
+volumes:
+  temporal-data:
+  sql-lakeshore-data:
+  sql-prairie-data:
+  redis-data:
+  rustfs-data:
+  fake-gcs-data:
