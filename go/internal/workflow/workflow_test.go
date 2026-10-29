@@ -1,5 +1,6 @@
-// Workflow tests W1–W15 in the Temporal test environment: the happy path, outages retried in place,
-// park-and-resolve, validators that reject without mutating state, approve-before-draft, expiry, and the semaphore.
+// Workflow tests W1–W18 in the Temporal test environment: the happy path, outages retried in place,
+// park-and-resolve, validators that reject without mutating state, approve-before-draft, expiry, the semaphore,
+// and a batch whose first instruction never arrives.
 // Activities are mocked; the workflow code under test is the production code.
 
 package workflow
@@ -64,7 +65,8 @@ type fakeCore struct {
 	draftFail    map[string]error // chunkId -> error to return (until cleared)
 	transientFor map[string]int   // chunkId -> remaining transient failures
 	authFail     map[string]error
-	deny         map[string]bool // groupKey -> DENY
+	deny         map[string]bool  // groupKey -> DENY
+	policyFail   map[string]error // groupKey -> error to return (until cleared)
 	inFlight     int
 	maxInFlight  int
 	slow         time.Duration
@@ -72,7 +74,7 @@ type fakeCore struct {
 }
 
 func newFakeCore() *fakeCore {
-	return &fakeCore{draftFail: map[string]error{}, transientFor: map[string]int{}, authFail: map[string]error{}, deny: map[string]bool{}, blocked: map[string]bool{}}
+	return &fakeCore{draftFail: map[string]error{}, transientFor: map[string]int{}, authFail: map[string]error{}, deny: map[string]bool{}, policyFail: map[string]error{}, blocked: map[string]bool{}}
 }
 
 type WorkflowSuite struct {
@@ -110,6 +112,9 @@ func (s *WorkflowSuite) SetupTest() {
 			core.mu.Lock()
 			defer core.mu.Unlock()
 			core.policyCalls++
+			if err := core.policyFail[in.Group.GroupKey]; err != nil {
+				return activities.PolicyDecision{}, err
+			}
 			if core.deny[in.Group.GroupKey] {
 				return activities.PolicyDecision{Decision: activities.DecisionDeny, Code: "DAILY_LIMIT_EXCEEDED", Message: "Daily limit exceeded"}, nil
 			}
@@ -543,6 +548,60 @@ func (s *WorkflowSuite) TestW15AuthorizePhaseHold() {
 	s.Contains(s.core.activityIDs, "reject/g01-c00/r1")
 	s.Equal(500+1, res.Totals.Authorized)
 	s.Equal(250, res.Totals.Rejected)
+}
+
+// W16: the first instruction never arrives (Update-with-Start started the execution but its Update was never
+// accepted). After the approval window the batch closes as CANCELLED, and Core is never called.
+func (s *WorkflowSuite) TestW16NoFirstInstruction() {
+	res := s.run(testInput())
+	s.Equal(PhaseCancelled, res.Phase)
+	s.Empty(s.core.activityIDs, "no Activity runs for a batch nobody acted on")
+	s.Contains(timelineTypes(s.finalView()), EvNoInstruction)
+}
+
+// W17: once Core's approval is recorded (here before the draft), cancel is refused in every phase, and a chunk
+// that parks afterwards is not offered CANCEL_BATCH.
+func (s *WorkflowSuite) TestW17NoCancelAfterApproval() {
+	s.core.draftFail["g00-c00"] = errOnHold
+	s.authorizeAt(0)
+	s.queryAt(time.Hour, func(v BatchView) {
+		s.Equal(PhaseDrafting, v.Phase)
+		s.Equal([]string{DecisionRetry, DecisionRejectChunk}, chunkView(v, "g00-c00").Attention.AllowedDecisions)
+	})
+	s.update(time.Hour+time.Minute, UpdateCancel, "cancel", CancelRequest{By: "jordan", Reason: "changed my mind"})
+	s.update(time.Hour+2*time.Minute, UpdateResolve, "cancel-batch", ResolveRequest{ChunkID: "g00-c00", Decision: DecisionCancelBatch, By: "morgan"})
+	s.env.RegisterDelayedCallback(func() {
+		s.core.mu.Lock()
+		delete(s.core.draftFail, "g00-c00")
+		s.core.mu.Unlock()
+	}, time.Hour+3*time.Minute)
+	s.resolveAt(time.Hour+4*time.Minute, "g00-c00", DecisionRetry)
+	res := s.run(testInput())
+
+	s.Error(s.rejected["cancel"])
+	s.Error(s.rejected["cancel-batch"])
+	s.Equal(PhaseAuthorized, res.Phase)
+}
+
+// W18: with Concurrency=1, a parked policy check releases its slot (like a chunk), so the other group's check
+// still runs while it waits for an operator.
+func (s *WorkflowSuite) TestW18ParkedPolicyCheckReleasesSlot() {
+	in := testInput()
+	in.Concurrency = 1
+	s.core.policyFail["4401220033|2026-11-03"] = temporal.NewNonRetryableApplicationError("GENTX_BATCH_NOT_FOUND (HTTP 404)",
+		model.ErrTypeCoreStructural, nil, model.CoreErrorDetails{Code: "GENTX_BATCH_NOT_FOUND", Message: "batch not found", HTTPStatus: 404})
+	s.draftAt(0)
+	s.queryAt(time.Hour, func(v BatchView) {
+		s.Require().NotNil(v.BatchAttention)
+		s.Equal("policy/g00", v.BatchAttention.Step)
+		s.core.mu.Lock()
+		s.Equal(2, s.core.policyCalls, "g01's check ran while g00's was parked")
+		delete(s.core.policyFail, "4401220033|2026-11-03")
+		s.core.mu.Unlock()
+	})
+	s.resolveAt(time.Hour+time.Minute, BatchTarget, DecisionRetry)
+	s.authorizeAt(2 * time.Hour)
+	s.Equal(PhaseAuthorized, s.run(in).Phase)
 }
 
 // Parked batch-level steps (e.g. EnsureGenTxBatch hitting a closed batch) accept RETRY and, while drafting,

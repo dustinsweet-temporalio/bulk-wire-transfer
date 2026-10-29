@@ -252,6 +252,7 @@ const (
 	EvChunkResolved         = "CHUNK_RESOLVED"
 	EvDrafted               = "DRAFTED"
 	EvAwaitingAuthorization = "AWAITING_AUTHORIZATION"
+	EvNoInstruction         = "NO_INSTRUCTION"
 	EvAuthorizing           = "AUTHORIZING"
 	EvAuthorized            = "AUTHORIZED"
 	EvExpired               = "EXPIRED"

@@ -156,6 +156,12 @@ workflow: the Activity's RetryPolicy retries them in place with exponential back
 bounded only by the ScheduleToClose retry budget. If the budget runs out, the chunk parks with
 `RETRY_BUDGET_EXHAUSTED`.
 
+Update-with-Start is not atomic: if the execution starts but its first Update is never accepted (no worker was
+polling and the caller gave up), nothing else would ever arrive. So the workflow's first wait has a timeout, the
+batch's approval window: a batch that receives no `draft` or `authorize` within it closes as CANCELLED instead of
+sitting in DRAFTING forever. In the normal case the Update arrives in the first Workflow Task and the timer never
+reaches the history.
+
 ## What is deliberately absent
 
 | Absent | Why |
@@ -174,13 +180,22 @@ bounded only by the ScheduleToClose retry budget. If the budget runs out, the ch
 
 One Temporal namespace (`bulkwire`) and one task queue shared by all FIs: Fairness and per-tenant rate limits
 work within a task queue. Tenants are separated by the `FiId` Search Attribute (lists), the Fairness key (dispatch),
-the FI in every workflow input (the worker config maps it to that FI's own Core), and separate Cores and databases
-(side effects). The alternative, a namespace per FI, gives harder isolation (separate limits, retention, access
+the FI in every workflow input (the worker config maps it to that FI's own Core), separate Cores and databases
+(side effects), and a separate service-to-service token per FI: each Core holds only its own, and bulkwire-service
+accepts a callback only for the FI whose token it carries. Each FI also has its own time zone, so "today" for
+process dates is the FI's local business day. The alternative, a namespace per FI, gives harder isolation (separate limits, retention, access
 control) but gives up cross-tenant fairness on one worker fleet and multiplies namespaces to operate.
 
 ## Security
 
 Every payload (workflow input/result, Activity inputs/results, Update arguments/results, Query results, failure
 details, user-metadata summaries) is encrypted with AES-256-GCM before it reaches the Temporal Service; the Codec
-Server decrypts for the Web UI and CLI. Search Attributes, IDs, Update names, and failure messages are not payloads
-and therefore carry no PII: account numbers are masked (`••0033`) everywhere they could appear.
+Server decrypts for the Web UI and CLI. Search Attributes, IDs, Update names, and failure messages and stack traces
+are not payloads, so they are stored unencrypted and must carry no PII: account numbers are masked (`••0033`)
+everywhere they could appear, and Core's error messages pass through a redaction guard (any run of 8+ digits is
+masked) before they can become a failure message.
+
+Approval decisions never trust the browser for the facts that drive them. After the draft, Core uses its own batch
+record; before it (approve-before-draft), Core reads the staged batch's owner, initiator, and total from
+bulkwire-service, server to server, so an approver cannot shrink the amount to stay under their limit or avoid
+dual control. Every approval read and decision is scoped to the approver's own company.

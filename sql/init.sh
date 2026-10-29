@@ -3,7 +3,9 @@
 # own SQL Server (SQL_HOST).
 #
 # Creates Core_<fiId> only if it does not exist, then runs 01-schema, 02-types, 03-procs, and that FI's seed
-# with `sqlcmd -b` (stop on the first error). If any script fails, the half-built database is dropped and
+# with `sqlcmd -b` (stop on the first error). When the database already exists, only 03-procs runs again:
+# stored procedures are code (every one is CREATE OR ALTER), so an updated repository takes effect on the next
+# `make up` without wiping the bank's data. If any script fails, the half-built database is dropped and
 # the job exits non-zero, so core-api (which depends on this job completing successfully) never starts
 # against a half-initialized database. `make reset` deletes the volume and rebuilds from scratch.
 set -euo pipefail
@@ -30,7 +32,9 @@ done
 
 exists="$(sql -h -1 -W -Q "SET NOCOUNT ON; SELECT CASE WHEN DB_ID('$DB') IS NULL THEN 0 ELSE 1 END")"
 if [ "$(echo "$exists" | tr -d '[:space:]')" = "1" ]; then
-  echo "[$FI] database $DB already exists; nothing to do"
+  echo "[$FI] database $DB already exists; re-applying stored procedures"
+  sql -d "$DB" -i /sql/03-procs.sql
+  echo "[$FI] $DB procedures up to date"
   exit 0
 fi
 

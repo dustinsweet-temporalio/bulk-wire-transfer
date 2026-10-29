@@ -41,8 +41,7 @@ wait_phase() { # port token batch phase seconds
   for _ in $(seq 1 "$5"); do p=$(phase "$1" "$2" "$3"); [ "$p" = "$4" ] && break; sleep 1; done
   echo "$p"
 }
-approve() { core "$1" "$2" /approvals -X POST -H 'Content-Type: application/json' \
-  -d "{\"batchId\":\"$3\",\"tac\":\"246810\",\"amountCents\":${4:-0},\"rowCount\":${5:-0},\"initiatedBy\":\"jordan\"}"; }
+approve() { core "$1" "$2" /approvals -X POST -H 'Content-Type: application/json' -d "{\"batchId\":\"$3\",\"tac\":\"246810\"}"; }
 resolve() { bw "$1" "$2" "/ops/batches/$3/resolve" -X POST -H "Idempotency-Key: e2e-$3-$4-$5" -H 'Content-Type: application/json' \
   -d "{\"chunkId\":\"$4\",\"decision\":\"$5\",\"note\":\"e2e\"}" -o /dev/null -w '%{http_code}'; }
 genTx() { local p=$1 tok=$2 b=$3; shift 3; core "$p" "$tok" "/gentx-batches/by-external/$b" "$@"; }
@@ -97,10 +96,26 @@ check "Core: 5,000 rows, 4,997 Drafted, 3 Rejected" "$(genTx 3001 "$J" "$B" | jq
 cpost /core/lakeshore/latency '{"chunkLatencyMs":600}' >/dev/null
 
 step "4. Dual approval"
+# Variables first: bash 3.2 (macOS) mis-parses escaped quotes inside a nested "$( ... "$( ... )" ... )".
+QN=$(login lakeshore NORTHLINE quinn); DENY_BODY="{\"batchId\":\"$B\",\"reason\":\"x\"}"
+check "an approver at another company cannot deny it" "$(core 3001 "$QN" /approvals/deny -X POST -H 'Content-Type: application/json' -d "$DENY_BODY" | jq -r .code)" APPROVAL_NOT_ALLOWED
 check "Alex -> PENDING_SECOND_APPROVAL" "$(approve 3001 "$A" "$B" | jq -r .status)" PENDING_SECOND_APPROVAL
 check "Sam -> APPROVED" "$(approve 3001 "$S" "$B" | jq -r .status)" APPROVED
 check "AUTHORIZED" "$(wait_phase 3001 "$J" "$B" AUTHORIZED 120)" AUTHORIZED
 check "4,997 Authorized in Core" "$(genTx 3001 "$J" "$B" | jq -r .counts.authorized)" 4997
+
+step "4b. Approve before draft: Core uses the staged amount, never the request's"
+stage 3001 "$J" summit-payroll-5000; B4=$BATCH
+FORGED=$(core 3001 "$A" /approvals -X POST -H 'Content-Type: application/json' \
+  -d "{\"batchId\":\"$B4\",\"tac\":\"246810\",\"amountCents\":100,\"rowCount\":1,\"initiatedBy\":\"sam\"}")
+check "a forged \$1 amount still needs two approvers" "$(echo "$FORGED" | jq -r '"\(.status) \(.requiredApprovers)"')" "PENDING_SECOND_APPROVAL 2"
+check "another company cannot read the approval" "$(core 3001 "$QN" "/approvals/$B4" -o /dev/null -w '%{http_code}')" 404
+cpost /core/lakeshore/latency '{"chunkLatencyMs":1500}' >/dev/null
+check "Sam -> APPROVED (starts the workflow)" "$(approve 3001 "$S" "$B4" | jq -r .status)" APPROVED
+sleep 3
+check "while it drafts, Jordan can no longer cancel it" "$(bw 3001 "$J" "/batches/$B4/cancel" -X POST -H 'Idempotency-Key: e2e-late-cancel' | jq -r .code)" REJECTED_BY_WORKFLOW
+cpost /core/lakeshore/latency '{"chunkLatencyMs":600}' >/dev/null
+check "one execution drafts, then authorizes" "$(wait_phase 3001 "$J" "$B4" AUTHORIZED 120)" AUTHORIZED
 
 step "5. Hold on ••0033 -> park -> ops releases and retries"
 # Upload first, then the hold (as in Scenario B): a hold placed before staging is caught by staging itself.

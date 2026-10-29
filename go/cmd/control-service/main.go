@@ -70,7 +70,7 @@ func run(log *slog.Logger) error {
 	svc := &control.Service{
 		Log: log, Cfg: cfg, Temporal: tc, Raw: raw, Codec: cdc,
 		Docker:        control.NewDocker("/var/run/docker.sock", os.Getenv("COMPOSE_PROJECT_NAME"), splitList(os.Getenv("CHAOS_ALLOWLIST"))),
-		Core:          coreclient.New(cfg.Core.Endpoints, cfg.Core.InternalToken),
+		Core:          coreclient.New(cfg.Core.Endpoints, cfg.Core.InternalTokens),
 		Store:         store,
 		Tokens:        auth.NewTokens(cfg.AuthSigningKey),
 		HTTP:          &http.Client{Timeout: 60 * time.Second},

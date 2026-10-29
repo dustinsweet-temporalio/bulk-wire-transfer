@@ -375,7 +375,7 @@ before each scenario. Users and passwords: see RUNBOOK-DEMO.md.
 
 - **Trigger:** Batches table: history size and event count
 - **Click path:** Batches table → Events / History columns.
-- **You'll see:** ~300 events and about 100 KB (measured) for 5,000 wires; the rows stay in the claim check.
+- **You'll see:** ~320 events and about 85 KB (measured) for 5,000 wires, authorized; the rows stay in the claim check.
 - **Handled by:** Claim Check; Basic Workflow Batch (https://docs.temporal.io/troubleshooting/blob-size-limit-error)
 - **Say this:** “References in, counts out: 5,000 wires cost a few hundred events.”
 

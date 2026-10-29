@@ -32,8 +32,11 @@ export function ApprovalModal({ facts, onClose }: { facts: ApprovalFacts; onClos
     setBusy(true);
     setError("");
     try {
-      setResult(await api.approve(facts.batchId, tac, facts.amountCents, facts.rows, facts.initiatedBy));
-      qc.invalidateQueries();
+      setResult(await api.approve(facts.batchId, tac));
+      // WHY only the approval: refreshing the batch here would swap a staged review for the live view the moment
+      // a final approval starts the workflow, closing this dialog before the approver reads the result. The
+      // page refreshes when the dialog closes (and the live view polls on its own).
+      qc.invalidateQueries({ queryKey: ["approval", facts.batchId] });
     } catch (e) {
       setError((e as ApiError).message);
     } finally {
@@ -46,7 +49,7 @@ export function ApprovalModal({ facts, onClose }: { facts: ApprovalFacts; onClos
     setError("");
     try {
       setResult(await api.deny(facts.batchId, reason));
-      qc.invalidateQueries();
+      qc.invalidateQueries({ queryKey: ["approval", facts.batchId] });
     } catch (e) {
       setError((e as ApiError).message);
     } finally {

@@ -211,7 +211,7 @@ Things to point at, top to bottom:
 | Header: **History Size** about 84 KB | The whole batch's history | "5,000 wires, but the rows themselves never enter Temporal; only references do." |
 | **Input** and **Result** panels | The batch input and the final totals (4,997 authorized, 3 rejected) | "Readable here, but stored encrypted. The UI decrypts through our Codec Server." |
 | **Timeline** (scroll down) | Every chunk as a labeled Activity, and the **Approval window (24h)** timer | "The approval wait is a durable timer: no polling, no cron job." |
-| **Event History** tab | Every step, in order (about 340 events) | "This is the audit trail, for free." |
+| **Event History** tab | Every step, in order (about 320 events) | "This is the audit trail, for free." |
 
 **Say:** "Everything you just watched in the bank's portal came from this one workflow: the progress bars are a
 live Query of its state, and the lists come from its Search Attributes. There is no separate status database."

@@ -83,8 +83,8 @@ func (s *batchState) budgetExhausted(lastFailure error) parkReason {
 // request (nil when the batch was cancelled instead).
 func (s *batchState) parkChunk(ctx workflow.Context, c *chunk, phase Phase, r parkReason) (string, *ResolveRequest) {
 	allowed := []string{DecisionRetry, DecisionRejectChunk}
-	if phase == PhaseDrafting {
-		allowed = append(allowed, DecisionCancelBatch) // once AUTHORIZING, approved wires cannot be cancelled
+	if s.cancelAllowed(phase) {
+		allowed = append(allowed, DecisionCancelBatch) // once approved, the wires cannot be cancelled
 	}
 	c.State = ChunkNeedsAttention
 	c.Attention = &Attention{Code: r.Code, Message: r.Message, Phase: phase, Since: workflow.Now(ctx), Source: r.Source, AllowedDecisions: allowed}
@@ -125,6 +125,7 @@ func (s *batchState) parkBatch(ctx workflow.Context, step string, r parkReason, 
 	}
 	defer s.batchParkSlot.Release(1)
 
+	allowCancel = allowCancel && s.cancelAllowed(PhaseDrafting)
 	allowed := []string{DecisionRetry}
 	if allowCancel {
 		allowed = append(allowed, DecisionCancelBatch)
@@ -155,9 +156,26 @@ func (s *batchState) parkBatch(ctx workflow.Context, step string, r parkReason, 
 // the same park-and-resolve semantics as chunks. It returns true when the step completed, false when the batch
 // was cancelled while the step was parked (or the workflow itself was cancelled: s.fatal).
 func (s *batchState) mustStep(ctx workflow.Context, step, summary string, activity any, input any, result any, allowCancel bool) bool {
+	return s.mustStepInSlot(ctx, nil, step, summary, activity, input, result, allowCancel)
+}
+
+// mustStepInSlot is mustStep for a step that runs under a concurrency slot (the policy checks). The slot is
+// held only while the Activity runs: it is released before parking and re-acquired for the retry.
+// WHY: same rule as chunks (chunks.go). A parked step must not hold a slot, or a few parked policy checks
+// would stall the others. On return the slot is NOT held, whatever the outcome.
+func (s *batchState) mustStepInSlot(ctx workflow.Context, slot workflow.Semaphore, step, summary string, activity any, input any, result any, allowCancel bool) bool {
 	for cycle := 0; ; cycle++ {
+		if slot != nil {
+			if err := slot.Acquire(ctx, 1); err != nil {
+				s.fatal = err
+				return false
+			}
+		}
 		actx := workflow.WithActivityOptions(ctx, coreActivityOptions(s.settings, fmt.Sprintf("%s/r%d", step, cycle), summary))
 		err := workflow.ExecuteActivity(actx, activity, input).Get(actx, result)
+		if slot != nil {
+			slot.Release(1)
+		}
 		if err == nil {
 			return true
 		}

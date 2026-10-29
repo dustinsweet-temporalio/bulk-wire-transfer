@@ -75,8 +75,8 @@ person decides. Here the right answer is to cancel and re-upload."
    **Cancelled** in the bank's system.
 
 **Say:** "Cancel is an Update, and the workflow checks it's allowed before accepting it: you can cancel while
-drafting or waiting for approval, never once release has started. In-flight work finishes cleanly, and the bank's
-records say exactly which wires were cancelled."
+drafting or waiting for approval, but never once the bank has approved the batch. In-flight work finishes cleanly,
+and the bank's records say exactly which wires were cancelled."
 
 ### F30: an approver says no
 
@@ -129,9 +129,11 @@ closed."
 3. **Window 3 (Sam):** the same → **"Approved (APR-…). Release started."**
 4. **Window 1 (Jordan):** the batch drafts *and* releases in one go: **Drafting**, then **Releasing**, then
    **Authorized**, 4,997 / 5,000. The **Timeline** starts with **authorization received**, before **plan ready**.
+   Jordan's **Cancel batch** button is gone: once the bank has approved a batch, it can't be cancelled.
 
 **Say:** "Approval and draft can arrive in either order. Whichever arrives first starts the one workflow for this
-batch, and the other joins it. It's the same workflow ID either way, so there can't be two."
+batch, and the other joins it. It's the same workflow ID either way, so there can't be two. And the amount the
+bank checked against Alex's limit came from the uploaded file on the server, not from Alex's browser."
 
 ### F22: a hold placed after approval
 

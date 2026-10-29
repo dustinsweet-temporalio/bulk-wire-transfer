@@ -17,7 +17,7 @@ public sealed class ApprovalResponseTests
     [Fact]
     public void First_of_two_signatures_is_pending_second_approval()
     {
-        var r = ApprovalResponses.From(new ApprovalRecord("PendingSecond", null, 2, null, null, null, [Alex]), OrchestrationOutcome.NotApplicable);
+        var r = ApprovalResponses.From(new ApprovalRecord("PendingSecond", null, 2, null, null, null, [Alex], "summit-logistics"), OrchestrationOutcome.NotApplicable);
         Assert.Equal("PENDING_SECOND_APPROVAL", r.Status);
         Assert.Equal(2, r.RequiredApprovers);
         Assert.Single(r.Signatures);
@@ -27,7 +27,7 @@ public sealed class ApprovalResponseTests
     [Fact]
     public void Approved_carries_the_reference_and_the_notification_outcome()
     {
-        var r = ApprovalResponses.From(new ApprovalRecord("Approved", "APR-01JB", 1, null, null, DateTime.UtcNow, [Alex]), OrchestrationOutcome.NotifyFailed);
+        var r = ApprovalResponses.From(new ApprovalRecord("Approved", "APR-01JB", 1, null, null, DateTime.UtcNow, [Alex], "summit-logistics"), OrchestrationOutcome.NotifyFailed);
         Assert.Equal(("APPROVED", "APR-01JB", "NOTIFY_FAILED"), (r.Status, r.ApprovalRef, r.Orchestration));
     }
 

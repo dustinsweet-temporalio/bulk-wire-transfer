@@ -9,7 +9,11 @@
 // would only validate the tokens it issues.
 package auth
 
-import "strings"
+import (
+	"strings"
+	"time"
+	_ "time/tzdata" // WHY: embed the time-zone database so LoadLocation works in any container image
+)
 
 // Roles as stored in Core (dbo.Users.Role).
 const (
@@ -28,7 +32,25 @@ type FI struct {
 	ShortName    string // wordmark text
 	PrimaryColor string
 	AccentColor  string
+	TimeZone     string // IANA zone of the FI's business day; "today" for process dates is the FI's local date
 	Companies    []Company
+}
+
+// Location is the FI's time zone (UTC if the zone is unknown).
+func (f FI) Location() *time.Location {
+	if loc, err := time.LoadLocation(f.TimeZone); err == nil {
+		return loc
+	}
+	return time.UTC
+}
+
+// LocalToday returns the FI's local calendar date at `now`, as midnight UTC of that date (the same form
+// time.Parse(time.DateOnly, ...) produces), so it compares directly with parsed process dates.
+// WHY: a wire dated for the customer's local "today" must not be rejected as past because UTC has already
+// rolled over (after about 5 p.m. in US time zones).
+func LocalToday(now time.Time, loc *time.Location) time.Time {
+	y, m, d := now.In(loc).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }
 
 // Company is a commercial customer of the FI (or the FI's own staff, Company ID "BANK").
@@ -50,7 +72,7 @@ type User struct {
 var Directory = map[string]FI{
 	"lakeshore": {
 		ID: "lakeshore", DisplayName: "Lakeshore Community Bank", ShortName: "Lakeshore",
-		PrimaryColor: "#0E2A47", AccentColor: "#C8962E",
+		PrimaryColor: "#0E2A47", AccentColor: "#C8962E", TimeZone: "America/Chicago",
 		Companies: []Company{
 			{CompanyID: "SUMMIT", CustomerID: "summit-logistics", Name: "Summit Logistics, Inc.", Users: []User{
 				{UserID: "jordan", Name: "Jordan Ellis", Role: RoleInitiator},
@@ -69,7 +91,7 @@ var Directory = map[string]FI{
 	},
 	"prairie": {
 		ID: "prairie", DisplayName: "Prairie Valley Credit Union", ShortName: "Prairie Valley",
-		PrimaryColor: "#1F4D3A", AccentColor: "#B5653A",
+		PrimaryColor: "#1F4D3A", AccentColor: "#B5653A", TimeZone: "America/Denver",
 		Companies: []Company{
 			{CompanyID: "HARVEST", CustomerID: "harvest-coop", Name: "Harvest Growers Co-op", Users: []User{
 				{UserID: "riley", Name: "Riley Chen", Role: RoleInitiator},

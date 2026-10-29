@@ -564,9 +564,9 @@ GO
 
 /* dbo.usp_RecordApprovalSignature — records one approver's signature; idempotent once Approved.
 
-   The amount, row count, and initiator come from Core's own batch record when the batch has been drafted;
-   before that (approve-before-draft) they come from the caller (the staging summary).
-   PRODUCTION NOTE: a real core computes these itself. */
+   The amount and initiator come from Core's own batch record when the batch has been drafted. Before that
+   (approve-before-draft) core-api passes them from the staged batch's manifest, which it reads server to
+   server from the orchestration layer; they never come from the approver's browser. */
 CREATE OR ALTER PROCEDURE dbo.usp_RecordApprovalSignature
   @ExternalBatchId           varchar(40),
   @CustomerId                varchar(64),
@@ -682,7 +682,8 @@ CREATE OR ALTER PROCEDURE dbo.usp_RecordDenial
 AS
 BEGIN
   SET NOCOUNT ON; SET XACT_ABORT ON;
-  DECLARE @msg nvarchar(2048), @GenTxStatus varchar(20), @GenTxAmount bigint, @ApprovalStatus varchar(20);
+  DECLARE @msg nvarchar(2048), @GenTxStatus varchar(20), @GenTxAmount bigint, @GenTxCustomer varchar(64),
+          @ApprovalStatus varchar(20), @ApprovalCustomer varchar(64);
 
   IF NOT EXISTS (SELECT 1 FROM dbo.Users WHERE UserId = @UserId AND CustomerId = @CustomerId AND Role = 'Approver')
   BEGIN
@@ -692,14 +693,24 @@ BEGIN
 
   BEGIN TRY
     BEGIN TRAN;
-      SELECT @GenTxStatus = Status, @GenTxAmount = ExpectedAmountCents FROM dbo.GenTxBatches WHERE ExternalBatchId = @ExternalBatchId;
+      SELECT @GenTxStatus = Status, @GenTxAmount = ExpectedAmountCents, @GenTxCustomer = CustomerId
+      FROM dbo.GenTxBatches WHERE ExternalBatchId = @ExternalBatchId;
+      SELECT @ApprovalStatus = Status, @ApprovalCustomer = CustomerId
+      FROM dbo.Approvals WITH (UPDLOCK, HOLDLOCK) WHERE ExternalBatchId = @ExternalBatchId;
+      -- Only the batch's own company may deny it. (Before the draft, core-api has already checked the staged
+      -- batch's owner with the orchestration layer.)
+      IF (@GenTxCustomer IS NOT NULL AND @GenTxCustomer <> @CustomerId)
+         OR (@ApprovalCustomer IS NOT NULL AND @ApprovalCustomer <> @CustomerId)
+      BEGIN
+        SET @msg = N'APPROVAL_NOT_ALLOWED: batch belongs to another customer';
+        THROW 51020, @msg, 1;
+      END
       IF @GenTxStatus IN ('Expired', 'Cancelled', 'Rejected', 'Authorizing', 'Authorized')
       BEGIN
         SET @msg = CONCAT(N'APPROVAL_CLOSED: batch is ', @GenTxStatus, N' and can no longer be denied');
         THROW 51022, @msg, 1;
       END
 
-      SELECT @ApprovalStatus = Status FROM dbo.Approvals WITH (UPDLOCK, HOLDLOCK) WHERE ExternalBatchId = @ExternalBatchId;
       IF @ApprovalStatus = 'Approved'
       BEGIN
         SET @msg = N'APPROVAL_CLOSED: batch is already approved and can no longer be denied';

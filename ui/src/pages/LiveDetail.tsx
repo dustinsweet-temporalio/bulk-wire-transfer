@@ -239,7 +239,8 @@ function CancelButton({ view, phase }: { view: BatchView; phase: string }) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
-  if (user.role !== "Initiator" || !["DRAFTING", "DRAFTED"].includes(phase)) return null;
+  // Once the bank has approved the batch it can't be cancelled (the workflow's validator enforces this too).
+  if (user.role !== "Initiator" || !["DRAFTING", "DRAFTED"].includes(phase) || view.authorization) return null;
   const cancel = async () => {
     setBusy(true);
     try {

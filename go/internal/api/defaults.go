@@ -87,12 +87,18 @@ func (s *Server) getDraftDefaults(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.Defaults.byFI)
 }
 
-// putDraftDefaults replaces the defaults of every FI present in the body ({ "lakeshore": {...}, ... }).
+// putDraftDefaults replaces the defaults of the caller's FI ({ "lakeshore": {...} }); the internal token decides
+// which FI that is.
 func (s *Server) putDraftDefaults(w http.ResponseWriter, r *http.Request) {
 	var body map[string]FIDefaults
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
 		return
+	}
+	for fi := range body { // a token may change only its own FI's defaults
+		if !sameFI(w, r, fi) {
+			return
+		}
 	}
 	s.Defaults.mu.Lock()
 	defer s.Defaults.mu.Unlock()

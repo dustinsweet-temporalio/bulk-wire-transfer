@@ -60,3 +60,16 @@ func TestTokenCarriesTheFIClaim(t *testing.T) {
 		t.Fatalf("claims: %+v", c)
 	}
 }
+
+// "Today" for process dates is the FI's local date: at 6 p.m. in Chicago it is already tomorrow in UTC, but a
+// wire dated for the customer's today must not count as past.
+func TestLocalTodayUsesTheFIsTimeZone(t *testing.T) {
+	loc := Directory["lakeshore"].Location()
+	evening := time.Date(2026, 10, 29, 18, 0, 0, 0, loc) // 23:00 UTC in October (CDT)
+	if got := LocalToday(evening.Add(2*time.Hour), loc); got != time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC) {
+		t.Fatalf("local today at 8 p.m. Chicago = %v, want 2026-10-29", got)
+	}
+	if loc.String() != "America/Chicago" || Directory["prairie"].Location().String() != "America/Denver" {
+		t.Fatalf("zones: %v %v", loc, Directory["prairie"].Location())
+	}
+}

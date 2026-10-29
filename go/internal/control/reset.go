@@ -59,7 +59,12 @@ func (s *Service) resetSteps() []resetStep {
 			return "per-FI limit removed", s.setFairness(r, false, 0)
 		}},
 		{"reset draft defaults", func(_ context.Context, r *http.Request) (string, error) {
-			return "defaults from .env", s.bulkwire(r, http.MethodPut, "/internal/draft-defaults", s.envDefaults(), nil)
+			for _, fi := range s.Cfg.Core.FiIDs() { // one call per FI: each carries that FI's token
+				if err := s.bulkwire(r, fi, http.MethodPut, "/internal/draft-defaults", map[string]any{fi: s.envDefaults()}, nil); err != nil {
+					return "", err
+				}
+			}
+			return "defaults from .env", nil
 		}},
 	}
 }

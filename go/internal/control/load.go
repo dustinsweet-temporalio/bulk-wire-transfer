@@ -116,13 +116,13 @@ func (s *Service) payrollDay(w http.ResponseWriter, r *http.Request) {
 	}
 	for fi, c := range perFI {
 		var cur map[string]any
-		if err := s.bulkwire(r, http.MethodGet, "/internal/draft-defaults", nil, &cur); err != nil {
+		if err := s.bulkwire(r, fi, http.MethodGet, "/internal/draft-defaults", nil, &cur); err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
 		d, _ := cur[fi].(map[string]any)
 		d["concurrency"] = c
-		if err := s.bulkwire(r, http.MethodPut, "/internal/draft-defaults", map[string]any{fi: d}, nil); err != nil {
+		if err := s.bulkwire(r, fi, http.MethodPut, "/internal/draft-defaults", map[string]any{fi: d}, nil); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}

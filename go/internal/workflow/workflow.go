@@ -36,10 +36,19 @@ func BulkWireBatch(ctx workflow.Context, in BatchInput) (BatchResult, error) {
 	}
 	s.publishDetails(ctx)
 
-	// Wait for the first instruction. Update-with-Start delivers it immediately (`draft` from the portal,
-	// or `authorize` from Core when an approver approved before anyone drafted).
-	if err := workflow.Await(ctx, func() bool { return s.draft != nil || s.authorization != nil || s.closeRequest != nil }); err != nil {
+	// Wait for the first instruction. Update-with-Start normally delivers it in the first Workflow Task
+	// (`draft` from the portal, or `authorize` from Core when an approver approved before anyone drafted).
+	// WHY a timeout: Update-with-Start is not atomic. If the execution starts but its Update is never
+	// accepted (no worker was polling and the caller gave up), nothing else will ever arrive. A batch nobody
+	// acts on within the approval window is closed as CANCELLED instead of sitting in DRAFTING forever.
+	ok, err := awaitWithTimer(ctx, in.ApprovalWindow, fmt.Sprintf("Waiting for a first instruction (%s)", humanDuration(in.ApprovalWindow)),
+		func() bool { return s.draft != nil || s.authorization != nil || s.closeRequest != nil })
+	if err != nil {
 		return BatchResult{}, err
+	}
+	if !ok {
+		s.addTimeline(ctx, EvNoInstruction, "no draft or approval arrived within "+humanDuration(in.ApprovalWindow))
+		return s.finish(ctx, PhaseCancelled)
 	}
 	if s.closeRequest != nil {
 		return s.finish(ctx, s.closeRequest.Phase) // e.g. denied or cancelled before anything ran
@@ -87,10 +96,8 @@ func BulkWireBatch(ctx workflow.Context, in BatchInput) (BatchResult, error) {
 	if s.authorization == nil && s.closeRequest == nil {
 		s.addTimeline(ctx, EvAwaitingAuthorization, "until "+s.authorizeBy.UTC().Format(time.RFC3339))
 		// DETERMINISM: a durable timer (with a summary for the Web UI) and workflow.Now, never the system clock.
-		ok, err := workflow.AwaitWithOptions(ctx, workflow.AwaitOptions{
-			Timeout:      in.ApprovalWindow,
-			TimerOptions: workflow.TimerOptions{Summary: fmt.Sprintf("Approval window (%s)", humanDuration(in.ApprovalWindow))},
-		}, func() bool { return s.authorization != nil || s.closeRequest != nil })
+		ok, err := awaitWithTimer(ctx, in.ApprovalWindow, fmt.Sprintf("Approval window (%s)", humanDuration(in.ApprovalWindow)),
+			func() bool { return s.authorization != nil || s.closeRequest != nil })
 		if err != nil {
 			return BatchResult{}, err
 		}
@@ -198,14 +205,10 @@ func (s *batchState) checkGroupPolicies(ctx workflow.Context) {
 		wg.Add(1)
 		workflow.Go(ctx, func(gctx workflow.Context) {
 			defer wg.Done()
-			if err := sem.Acquire(gctx, 1); err != nil {
-				s.fatal = err
-				return
-			}
-			defer sem.Release(1)
 			var d activities.PolicyDecision
 			summary := fmt.Sprintf("Policy check %s · %s · %s", maskedGroup(g), g.Info.ProcessDate, dollars(g.Info.TotalAmountCents))
-			if !s.mustStep(gctx, fmt.Sprintf("policy/g%02d", i), summary, a.CheckGroupPolicy,
+			// The slot is held only while the check runs; a parked check releases it (mustStepInSlot).
+			if !s.mustStepInSlot(gctx, sem, fmt.Sprintf("policy/g%02d", i), summary, a.CheckGroupPolicy,
 				activities.PolicyInput{FiID: s.in.FiID, GenTxBatchID: s.genTxBatchID, Group: g.Info}, &d, true) {
 				return
 			}
@@ -217,6 +220,24 @@ func (s *batchState) checkGroupPolicies(ctx workflow.Context) {
 	}
 	wg.Wait(ctx)
 	s.publishDetails(ctx)
+}
+
+// awaitWithTimer waits until condition() is true (returns true) or the durable timer fires (returns false).
+// WHY not workflow.AwaitWithOptions: in this SDK version it leaves its timer running after the condition is met,
+// so the history and the Web UI show a timer that no longer means anything, and it fires later for nothing. Here
+// the timer is cancelled the moment the condition holds. If that happens in the same Workflow Task that created
+// it (an Update delivered with Update-with-Start), the timer never reaches the history at all.
+func awaitWithTimer(ctx workflow.Context, d time.Duration, summary string, condition func() bool) (bool, error) {
+	if condition() {
+		return true, nil
+	}
+	tctx, cancelTimer := workflow.WithCancel(ctx)
+	defer cancelTimer()
+	timer := workflow.NewTimerWithOptions(tctx, d, workflow.TimerOptions{Summary: summary})
+	if err := workflow.Await(ctx, func() bool { return condition() || timer.IsReady() }); err != nil {
+		return false, err
+	}
+	return condition(), nil
 }
 
 func humanDuration(d time.Duration) string {

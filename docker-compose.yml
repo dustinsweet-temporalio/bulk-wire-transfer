@@ -48,7 +48,8 @@ x-go-env: &go-env
   CORE_RETRY_MAX_INTERVAL: ${CORE_RETRY_MAX_INTERVAL}
   CORE_RETRY_ALERT_THRESHOLD: ${CORE_RETRY_ALERT_THRESHOLD}
   CORE_ENDPOINTS: ${CORE_ENDPOINTS}
-  INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+  # One token per FI; each Core holds only its own (see core-lakeshore / core-prairie below).
+  INTERNAL_TOKENS: lakeshore=${INTERNAL_TOKEN_LAKESHORE},prairie=${INTERNAL_TOKEN_PRAIRIE}
   BULKWIRE_INTERNAL_URL: ${BULKWIRE_INTERNAL_URL}
 
 # Claim-check backends are each in their own profile; only the active one exists. `required: false`
@@ -93,7 +94,6 @@ x-core: &core
     CORE_DUAL_CONTROL_THRESHOLD_CENTS: ${CORE_DUAL_CONTROL_THRESHOLD_CENTS}
     CORE_DEMO_TAC: ${CORE_DEMO_TAC}
     CORE_SIMULATED_LATENCY_MS: ${CORE_SIMULATED_LATENCY_MS}
-    INTERNAL_TOKEN: ${INTERNAL_TOKEN}
     AUTH_SIGNING_KEY: ${AUTH_SIGNING_KEY}
     BULKWIRE_INTERNAL_URL: ${BULKWIRE_INTERNAL_URL}
     ASPNETCORE_HTTP_PORTS: "8080"
@@ -208,7 +208,8 @@ services:
     environment:
       <<: *core-env
       FI_ID: lakeshore
-      # Each Core connects only to its own FI's SQL Server (tenant isolation).
+      # Each Core holds only its own FI's internal token, and connects only to its own FI's SQL Server.
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN_LAKESHORE}
       CORE_CONNECTION_STRING: "Server=sql-lakeshore,1433;Database=Core_lakeshore;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True;Application Name=core-lakeshore"
     depends_on:
       sqlinit-lakeshore: { condition: service_completed_successfully }
@@ -218,6 +219,7 @@ services:
     environment:
       <<: *core-env
       FI_ID: prairie
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN_PRAIRIE}
       CORE_CONNECTION_STRING: "Server=sql-prairie,1433;Database=Core_prairie;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True;Application Name=core-prairie"
     depends_on:
       sqlinit-prairie: { condition: service_completed_successfully }

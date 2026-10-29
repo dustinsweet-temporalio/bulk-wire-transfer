@@ -107,11 +107,17 @@ func (s *batchState) validateClose(action string) error {
 		return fmt.Errorf("batch is %s; it can no longer be %s", s.phase, action)
 	case s.phase.Terminal():
 		return fmt.Errorf("batch is already %s", s.phase)
-	case s.phase == PhaseDrafted && s.authorization != nil:
-		// Core approved it and the release has begun (Core is being moved to Authorizing).
-		return fmt.Errorf("batch was approved (%s) and is being released; it can no longer be %s", s.authorization.ApprovalRef, action)
+	case s.authorization != nil:
+		// WHY any phase: Core's approval is final. An approval can arrive before or during the draft
+		// (approve-before-draft); cancelling after it would leave Core showing Approved for a cancelled batch.
+		return fmt.Errorf("batch was approved (%s); it can no longer be %s", s.authorization.ApprovalRef, action)
 	}
 	return nil
+}
+
+// cancelAllowed reports whether CANCEL_BATCH may be offered to an operator for an item parked now.
+func (s *batchState) cancelAllowed(phase Phase) bool {
+	return phase == PhaseDrafting && s.authorization == nil
 }
 
 func (s *batchState) validateDeny(_ workflow.Context, _ DenyRequest) error {
@@ -144,6 +150,9 @@ func (s *batchState) handleCancel(ctx workflow.Context, req CancelRequest) (Batc
 //   - chunk parked while AUTHORIZING: RETRY | REJECT_CHUNK            (wires are already approved)
 //   - "_batch" step while DRAFTING:   RETRY | CANCEL_BATCH            (no chunk to reject)
 //   - "_batch" step otherwise:        RETRY
+//
+// CANCEL_BATCH is never offered once Core's approval has been recorded (cancelAllowed), and it is re-checked
+// here because the approval may arrive after the item parked.
 func (s *batchState) validateResolve(_ workflow.Context, req ResolveRequest) error {
 	var att *Attention
 	var pending *ResolveRequest
@@ -161,6 +170,9 @@ func (s *batchState) validateResolve(_ workflow.Context, req ResolveRequest) err
 		return fmt.Errorf("%s already has a pending decision (%s)", req.ChunkID, pending.Decision)
 	case !slices.Contains(att.AllowedDecisions, req.Decision):
 		return fmt.Errorf("decision %q is not allowed for %s now (allowed: %v)", req.Decision, req.ChunkID, att.AllowedDecisions)
+	case req.Decision == DecisionCancelBatch:
+		// The approval may have arrived after this item parked; it closes the cancel option.
+		return s.validateClose("cancelled")
 	}
 	return nil
 }

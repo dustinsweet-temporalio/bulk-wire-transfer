@@ -75,7 +75,9 @@ func (s *Service) collectCore(r *http.Request, path string) map[string]any {
 
 // ---- draft defaults (bulkwire-service /internal/draft-defaults) --------------------------------------------
 
-func (s *Service) bulkwire(r *http.Request, method, path string, body any, out any) error {
+// bulkwire calls one of bulkwire-service's internal hooks on behalf of one FI, with that FI's token: a PUT may
+// change only that FI's defaults.
+func (s *Service) bulkwire(r *http.Request, fiID, method, path string, body any, out any) error {
 	var rdr io.Reader
 	if body != nil {
 		data, _ := json.Marshal(body)
@@ -86,7 +88,7 @@ func (s *Service) bulkwire(r *http.Request, method, path string, body any, out a
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", s.Cfg.Core.InternalToken)
+	req.Header.Set("X-Internal-Token", s.Cfg.Core.TokenFor(fiID))
 	resp, err := s.HTTP.Do(req)
 	if err != nil {
 		return err
@@ -111,7 +113,7 @@ func (e *httpError) Error() string { return http.StatusText(e.status) + ": " + e
 
 func (s *Service) getDraftDefaults(w http.ResponseWriter, r *http.Request) {
 	var all map[string]any
-	if err := s.bulkwire(r, http.MethodGet, "/internal/draft-defaults", nil, &all); err != nil {
+	if err := s.bulkwire(r, r.PathValue("fiId"), http.MethodGet, "/internal/draft-defaults", nil, &all); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -125,7 +127,7 @@ func (s *Service) putDraftDefaults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var all map[string]any
-	if err := s.bulkwire(r, http.MethodPut, "/internal/draft-defaults", map[string]any{r.PathValue("fiId"): body}, &all); err != nil {
+	if err := s.bulkwire(r, r.PathValue("fiId"), http.MethodPut, "/internal/draft-defaults", map[string]any{r.PathValue("fiId"): body}, &all); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -135,11 +137,6 @@ func (s *Service) putDraftDefaults(w http.ResponseWriter, r *http.Request) {
 // envDefaults are the .env draft defaults, used by reset.
 func (s *Service) envDefaults() map[string]any {
 	d := s.Cfg.Defaults
-	v := map[string]any{"chunkSize": d.ChunkSize, "concurrency": d.Concurrency, "approvalWindow": d.ApprovalWindow.String(),
+	return map[string]any{"chunkSize": d.ChunkSize, "concurrency": d.Concurrency, "approvalWindow": d.ApprovalWindow.String(),
 		"retryBudget": d.RetryBudget.String(), "retryMaxInterval": d.RetryMaxInterval.String()}
-	out := map[string]any{}
-	for _, fi := range s.Cfg.Core.FiIDs() {
-		out[fi] = v
-	}
-	return out
 }

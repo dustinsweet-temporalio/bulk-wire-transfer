@@ -245,7 +245,7 @@ export const catalog: Entry[] = [
     say: "On-call hears about a stuck Core from a metric long before any retry budget runs out." },
   { id: "F43", category: "Deployments, security, observability", title: "Payload and history limits", trigger: "Batches table: history size and event count",
     actions: [{ kind: "goto", section: "batches", label: "Open batches" }],
-    see: "~300 events and about 100 KB (measured) for 5,000 wires; the rows stay in the claim check.", handled: "Claim Check; Basic Workflow Batch", link: D.claimCheck,
+    see: "~320 events and about 85 KB (measured) for 5,000 wires, authorized; the rows stay in the claim check.", handled: "Claim Check; Basic Workflow Batch", link: D.claimCheck,
     say: "References in, counts out: 5,000 wires cost a few hundred events." },
   { id: "F44", category: "Deployments, security, observability", title: "Operator pauses retries during a long outage", trigger: "CLI (Public Preview)", actions: [],
     narrated: "temporal activity pause --namespace bulkwire -w <workflowId> --activity-id <activityId>   (then: temporal activity unpause …). Takes effect after the current attempt: these Activities do not heartbeat.",

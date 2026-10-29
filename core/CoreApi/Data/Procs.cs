@@ -238,7 +238,7 @@ public sealed class Procs(SqlExecutor sql)
 
     private static async Task<ApprovalRecord> ReadApprovalAsync(SqlDataReader r, CancellationToken c)
     {
-        string? status = null, approvalRef = null, deniedBy = null, denyReason = null;
+        string? status = null, approvalRef = null, deniedBy = null, denyReason = null, customerId = null;
         int required = 0;
         DateTime? completedAt = null;
         if (await r.ReadAsync(c))
@@ -249,12 +249,13 @@ public sealed class Procs(SqlExecutor sql)
             deniedBy = NullableString(r, "DeniedBy");
             denyReason = NullableString(r, "DenyReason");
             completedAt = r.IsDBNull("CompletedAt") ? null : Utc(r.GetDateTime("CompletedAt"));
+            customerId = r.GetString("CustomerId");
         }
         await r.NextResultAsync(c);
         var signatures = new List<Signature>();
         while (await r.ReadAsync(c))
             signatures.Add(new Signature(r.GetString("UserId"), r.GetString("DisplayName"), Utc(r.GetDateTime("SignedAt"))));
-        return new ApprovalRecord(status, approvalRef, required, deniedBy, denyReason, completedAt, signatures);
+        return new ApprovalRecord(status, approvalRef, required, deniedBy, denyReason, completedAt, signatures, customerId);
     }
 
     private static AccountView ReadAccount(SqlDataReader r) =>

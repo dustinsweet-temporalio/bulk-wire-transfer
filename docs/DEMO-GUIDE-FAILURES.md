@@ -287,7 +287,7 @@ Open the batch in the Temporal UI (**Open in Temporal UI** in Window 1, or Windo
 | Where | What it shows | Say |
 |---|---|---|
 | **Result** panel | `"phase": "AUTHORIZED"`, `"drafted": 4997`, `"authorized": 4997`, `"rejected": 3` | "One batch, one result, despite the hold." |
-| Header: **History Size** (about 170 KB) and **Event History** (about 400 events) | The whole story, park and resolve included | "The parked chunks, Morgan's decisions, the approval wait, and the release, all in one history." |
+| Header: **History Size** (about 170 KB) and **Event History** (about 380 events) | The whole story, park and resolve included | "The parked chunks, Morgan's decisions, the approval wait, and the release, all in one history." |
 | **Timeline** chart | The **Approval window (24h)** timer, and every chunk as a labeled Activity | "The approval deadline is a durable timer inside the batch. No cron job." |
 | **Event History** tab | The seven `resolve` Updates from Morgan, each followed by the retried chunk | "Every human decision is in the audit trail, next to the work it caused." |
 

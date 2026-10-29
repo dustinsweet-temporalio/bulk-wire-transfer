@@ -45,7 +45,7 @@ These hold everywhere in the codebase; breaking one is a defect.
 | 1 | One workflow per batch (`BulkWireBatch`) | `go/internal/workflow/workflow.go`; `go/cmd/worker/main.go` registers only it | `grep -rn RegisterWorkflow go/` → one registration |
 | 2 | No child workflows, Signals, Continue-As-New; chunks are Activities under `workflow.NewSemaphore`; inbound = Updates with validators; reads = Query `status` | `go/internal/workflow/handlers.go`, `chunks.go` | grep for `ExecuteChildWorkflow`, `GetSignalChannel`, `NewContinueAsNewError` in `go/` → none |
 | 3 | No `MaximumAttempts` on Core Activities | `go/internal/workflow/options.go:coreActivityOptions` | grep `MaximumAttempts` → only comments |
-| 4 | Failures never leave Temporal: park + `resolve` | `go/internal/workflow/park.go` | W4–W7, W13, W15; catalog F17, F21, F26 |
+| 4 | Failures never leave Temporal: park + `resolve`; a parked item never holds a concurrency slot; a batch whose first instruction never arrives closes instead of waiting forever | `go/internal/workflow/park.go`, `workflow.go` | W4–W7, W13, W15, W16, W18; catalog F17, F21, F26 |
 | 5 | Business outcomes are results | `go/internal/activities/activities.go:CheckGroupPolicy`, `InsertDraftChunk`; `sql/03-procs.sql` | W11, W14; F23, F24 |
 | 6 | No heartbeats; StartToClose 60 s | `go/internal/workflow/options.go:StartToClose` | grep `HeartbeatTimeout`, `RecordHeartbeat` → none |
 | 7 | References, not data | `go/internal/activities/types.go` | Activity tests: only the chunk's pages are read |
@@ -53,8 +53,8 @@ These hold everywhere in the codebase; breaking one is a defect.
 | 9 | Workflow determinism | `go/internal/workflow/*` (`DETERMINISM:` comments) | review grep for `time.Now`, `rand.`, `go func`, `select {`, `net/http`, `os.Getenv` → empty; `make replay` |
 | 10 | Worker Versioning (Pinned); encrypting DataConverter everywhere + Codec Server | `go/cmd/worker`, `go/internal/codec`, `go/cmd/codec-server`, `go/internal/temporalx/dial.go` (refuses a nil converter) | Scenarios E and F; `TestFailureDetailsAreEncrypted` |
 | 11 | One namespace `bulkwire`; five Search Attributes created by init and verified at startup; no PII in SAs/IDs | `scripts/temporal-init.sh`; `go/internal/temporalx/dial.go:VerifySearchAttributes` | e2e step 1 |
-| 11a | One Core (API + SQL Server) per FI | `docker-compose.yml` (`core-*`, `sql-*`) | e2e step 9; catalog F08 |
+| 11a | One Core (API + SQL Server) per FI, each with its own service-to-service token | `docker-compose.yml` (`core-*`, `sql-*`); `go/internal/api/auth.go:internal`, `sameFI` | e2e step 9; `TestInternalCallsAreScopedToTheTokensFI`; catalog F08 |
 | 11b | Demo code isolated | `go/internal/control`, `control-ui/`; labeled `DEMO-ONLY` hooks in `core/CoreApi/Demo`, `go/internal/api/defaults.go`, `go/internal/workflow/workflow.go` | `grep -rn DEMO-ONLY` |
 | 12 | Claim check only as an immutable read-only store | `go/internal/claimcheck/store.go` (no Update/Delete); Redis imported only there and in `go/internal/control/expire.go` | `grep -rln go-redis go/` |
-| 13 | Core is the system of record; stored procedures with TVPs; 30 s SQL timeout | `sql/03-procs.sql`; `core/CoreApi/Data/Tvp.cs`, `SqlExecutor.cs` | catalog F02 and F10 (real 504 after 30 s); `TvpTests` |
+| 13 | Core is the system of record (approval facts come from Core's records or the server-side staged batch, never the browser); stored procedures with TVPs; 30 s SQL timeout | `sql/03-procs.sql`; `core/CoreApi/Data/Tvp.cs`, `SqlExecutor.cs`; `core/CoreApi/Endpoints/ApprovalsEndpoints.cs:SubjectAsync` | catalog F02 and F10 (real 504 after 30 s); `TvpTests`; e2e steps 4 and 4b |
 | 14 | Honesty: fault injection and latency only in DEMO-ONLY paths, external conditions only | `core/CoreApi/Demo/*`, `go/internal/control` | no concurrency-dependent slowdown exists anywhere |

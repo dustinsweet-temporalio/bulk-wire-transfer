@@ -94,9 +94,11 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, c auth.Claims) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
+	now := s.Now()
 	m, err := staging.Stage(ctx, s.Store, s.Core, staging.Input{
 		BatchID: ulid.Make().String(), FiID: c.FiID, CustomerID: c.CustomerID, UploadedBy: c.UserID(),
-		FileName: header.Filename, Data: data, UploadedAt: s.Now(), MaxRows: s.Cfg.Defaults.MaxRows,
+		FileName: header.Filename, Data: data, UploadedAt: now, Today: auth.LocalToday(now, fiLocation(c.FiID)),
+		MaxRows: s.Cfg.Defaults.MaxRows,
 		PageSize: s.Cfg.ClaimCheck.PageSize,
 	})
 	var fileErr *staging.FileError
@@ -238,10 +240,10 @@ func (s *Server) listSamples(w http.ResponseWriter, _ *http.Request, c auth.Clai
 	writeJSON(w, http.StatusOK, out)
 }
 
-// sampleCSV serves a freshly generated sample (process dates relative to today).
-func (s *Server) sampleCSV(w http.ResponseWriter, r *http.Request, _ auth.Claims) {
+// sampleCSV serves a freshly generated sample (process dates relative to the FI's local today).
+func (s *Server) sampleCSV(w http.ResponseWriter, r *http.Request, c auth.Claims) {
 	name, ok := strings.CutSuffix(r.PathValue("file"), ".csv")
-	data, err := samples.Generate(name, s.Now())
+	data, err := samples.Generate(name, auth.LocalToday(s.Now(), fiLocation(c.FiID)))
 	if !ok || err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "unknown sample")
 		return
@@ -249,4 +251,12 @@ func (s *Server) sampleCSV(w http.ResponseWriter, r *http.Request, _ auth.Claims
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".csv"))
 	_, _ = w.Write(data)
+}
+
+// fiLocation is the FI's business time zone (UTC for an unknown FI).
+func fiLocation(fiID string) *time.Location {
+	if fi, ok := auth.Directory[fiID]; ok {
+		return fi.Location()
+	}
+	return time.UTC
 }

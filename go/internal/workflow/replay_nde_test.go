@@ -26,7 +26,8 @@ func reorderedBulkWireBatch(ctx workflow.Context, in BatchInput) (BatchResult, e
 		return BatchResult{}, err
 	}
 	s.publishDetails(ctx)
-	if err := workflow.Await(ctx, func() bool { return s.draft != nil || s.authorization != nil }); err != nil {
+	if _, err := awaitWithTimer(ctx, in.ApprovalWindow, "Waiting for a first instruction",
+		func() bool { return s.draft != nil || s.authorization != nil }); err != nil {
 		return BatchResult{}, err
 	}
 	s.setPhase(ctx, PhaseDrafting)

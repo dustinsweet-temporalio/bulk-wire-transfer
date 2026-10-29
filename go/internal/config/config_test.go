@@ -1,4 +1,5 @@
-// Tests for environment configuration: per-FI Core endpoints, durations, and reporting every malformed value at once.
+// Tests for environment configuration: per-FI Core endpoints and tokens, durations, and reporting every malformed
+// value at once.
 
 package config
 
@@ -38,6 +39,31 @@ func TestLoadReportsEveryMalformedValue(t *testing.T) {
 	for _, want := range []string{"DEFAULT_CHUNK_SIZE", "APPROVAL_WINDOW", "CORE_ENDPOINTS"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %s: %v", want, err)
+		}
+	}
+}
+
+// Each FI needs its own internal token; a missing or shared token is a configuration error, and the error never
+// echoes a token.
+func TestInternalTokensArePerFI(t *testing.T) {
+	t.Setenv("CORE_ENDPOINTS", "lakeshore=http://l:8080,prairie=http://p:8080")
+	t.Setenv("INTERNAL_TOKENS", "lakeshore=secret-l,prairie=secret-p")
+	c, err := Load()
+	if err != nil || c.RequireCore() != nil {
+		t.Fatalf("valid config rejected: %v %v", err, c.RequireCore())
+	}
+	if fi, ok := c.Core.FIForToken("secret-p"); !ok || fi != "prairie" || c.Core.TokenFor("lakeshore") != "secret-l" {
+		t.Fatalf("token lookup: %q %v", fi, ok)
+	}
+	if _, ok := c.Core.FIForToken(""); ok {
+		t.Fatal("empty token matched an FI")
+	}
+	for _, bad := range []string{"lakeshore=same,prairie=same", "lakeshore=secret-l"} {
+		t.Setenv("INTERNAL_TOKENS", bad)
+		c, _ := Load()
+		err := c.RequireCore()
+		if err == nil || strings.Contains(err.Error(), "same") || strings.Contains(err.Error(), "secret") {
+			t.Errorf("%q: want an error that names FIs, not tokens; got %v", bad, err)
 		}
 	}
 }

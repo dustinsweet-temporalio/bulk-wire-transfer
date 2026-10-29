@@ -47,6 +47,7 @@ type Input struct {
 	FileName   string
 	Data       []byte
 	UploadedAt time.Time
+	Today      time.Time // the FI's local date at upload (auth.LocalToday); process dates before it are past
 	MaxRows    int
 	PageSize   int
 }
@@ -63,7 +64,10 @@ var ErrAccountsUnavailable = errors.New("staging: bank system unavailable for ac
 // Stage validates the file and writes the staged batch. Order matters: row pages, invalid-row pages, and
 // errors.json first, manifest.json LAST, so a manifest's presence means staging completed.
 func Stage(ctx context.Context, store claimcheck.Store, accounts AccountChecker, in Input) (model.Manifest, error) {
-	today := in.UploadedAt.UTC().Truncate(24 * time.Hour)
+	today := in.Today
+	if today.IsZero() {
+		today = in.UploadedAt.UTC().Truncate(24 * time.Hour)
+	}
 	parsed, ferr := parse(in.Data, in.BatchID, today, in.MaxRows)
 	if ferr != nil {
 		return model.Manifest{}, ferr

@@ -4,6 +4,7 @@
 //
 // PATTERN: Approval — https://docs.temporal.io/design-patterns/approval
 // The workflow waits durably for this decision; it never makes it.
+using CoreApi.Auth;
 using CoreApi.Config;
 using CoreApi.Contracts;
 using CoreApi.Data;
@@ -26,11 +27,14 @@ public static class ApprovalsEndpoints
             if (body.Tac != options.DemoTac)
                 throw new CoreException(401, "TAC_INVALID", "The security code is not correct", false);
 
-            // 2. Determination + dual control, in the system of record.
-            var record = await procs.RecordApprovalSignatureAsync(body.BatchId, user.CustomerId ?? "", user.UserId,
-                body.InitiatedBy, body.AmountCents, options.DualControlThresholdCents, ct);
+            // 2. What is being approved: Core's own batch record, or before the draft, the staged batch.
+            var subject = await SubjectAsync(body.BatchId, user, procs, callback, ct);
 
-            // 3. Fully approved -> tell the orchestration layer. Re-calling after approval re-sends the
+            // 3. Determination + dual control, in the system of record.
+            var record = await procs.RecordApprovalSignatureAsync(body.BatchId, user.CustomerId ?? "", user.UserId,
+                subject.InitiatedBy, subject.AmountCents, options.DualControlThresholdCents, ct);
+
+            // 4. Fully approved -> tell the orchestration layer. Re-calling after approval re-sends the
             // callback; that is safe because the workflow Update ID is the approvalRef.
             var orchestration = OrchestrationOutcome.NotApplicable;
             if (record.Status == "Approved")
@@ -46,12 +50,44 @@ public static class ApprovalsEndpoints
             BulkwireCallbackClient callback, CancellationToken ct) =>
         {
             var user = http.PortalUser();
+            await SubjectAsync(body.BatchId, user, procs, callback, ct); // the batch must exist and be this company's
             var record = await procs.RecordDenialAsync(body.BatchId, user.CustomerId ?? "", user.UserId, body.Reason, ct);
             var orchestration = await callback.NotifyDeniedAsync(new DeniedCallback(options.FiId, body.BatchId, user.UserId, body.Reason), ct);
             return Results.Ok(ApprovalResponses.From(record, orchestration));
         });
 
-        group.MapGet("/{batchId}", async (string batchId, Procs procs, CancellationToken ct) =>
-            Results.Ok(ApprovalResponses.From(await procs.GetApprovalAsync(batchId, ct), OrchestrationOutcome.NotApplicable)));
+        group.MapGet("/{batchId}", async (HttpContext http, string batchId, Procs procs, CancellationToken ct) =>
+        {
+            var user = http.PortalUser();
+            var record = await procs.GetApprovalAsync(batchId, ct);
+            // Another company's batch is "not found"; bank operations staff may read any (exceptions page). The
+            // owner is the approval row's customer, or before anyone signed, Core's batch record's customer.
+            var owner = record.CustomerId ?? (await procs.GetGenTxBatchByExternalIdAsync(batchId, ct))?.CustomerId;
+            if (owner is not null && !user.IsBankOps && owner != user.CustomerId)
+                throw new CoreException(404, "BATCH_NOT_FOUND", "batch not found", false);
+            return Results.Ok(ApprovalResponses.From(record, OrchestrationOutcome.NotApplicable));
+        });
+    }
+
+    private sealed record Subject(string InitiatedBy, long AmountCents);
+
+    // The batch an approval or denial is about. After the draft, Core's own batch record is authoritative (the
+    // procedures also re-check its owner). Before the draft, Core has no record yet, so it asks the orchestration
+    // layer for the staged batch, server to server.
+    // WHY not the request body: the amount decides approval limits and dual control. Taking it from the browser
+    // would let an approver send a smaller amount and approve a batch above their limit, or alone.
+    private static async Task<Subject> SubjectAsync(string batchId, PortalUser user, Procs procs,
+        BulkwireCallbackClient bulkwire, CancellationToken ct)
+    {
+        var genTx = await procs.GetGenTxBatchByExternalIdAsync(batchId, ct);
+        if (genTx is not null)
+            return new Subject(genTx.InitiatedBy, genTx.ExpectedAmountCents);
+
+        var staged = await bulkwire.GetStagedBatchAsync(batchId, ct);
+        if (staged is null || staged.CustomerId != user.CustomerId)
+            throw new CoreException(404, "BATCH_NOT_FOUND", "batch not found", false);
+        if (staged.Status != "VALID")
+            throw new CoreException(409, "STAGING_INVALID", "this file has errors and cannot be approved", false);
+        return new Subject(staged.UploadedBy, staged.AmountCents);
     }
 }

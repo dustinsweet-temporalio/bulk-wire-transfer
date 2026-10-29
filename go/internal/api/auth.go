@@ -4,12 +4,11 @@
 // HS256 token. Every handler takes fiId / customerId / role from the token, never from request bodies, and
 // answers 404 for another FI's or customer's batches.
 // PRODUCTION NOTE: the FI's identity provider (OIDC) issues tokens; this service would only validate them,
-// and service-to-service calls would use mTLS or workload identity instead of a shared internal token.
+// and service-to-service calls would use mTLS or workload identity instead of per-FI internal tokens.
 package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -35,16 +34,29 @@ func (s *Server) user(h func(http.ResponseWriter, *http.Request, auth.Claims)) h
 	}
 }
 
-// internal wraps a service-to-service handler (core-api callbacks, control-service hooks).
+type internalFIKey struct{}
+
+// internal wraps a service-to-service handler (core-api callbacks, control-service hooks). Each FI has its own
+// token; the FI it belongs to is put in the request context, and every handler that acts on an FI's batch
+// checks it with sameFI. WHY: one FI's Core must never be able to act on another FI's batches.
 func (s *Server) internal(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		got := r.Header.Get("X-Internal-Token")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(s.Cfg.Core.InternalToken)) != 1 || got == "" {
+		fi, ok := s.Cfg.Core.FIForToken(r.Header.Get("X-Internal-Token"))
+		if !ok {
 			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or invalid internal token")
 			return
 		}
-		h(w, r)
+		h(w, r.WithContext(context.WithValue(r.Context(), internalFIKey{}, fi)))
 	}
+}
+
+// sameFI answers 403 unless the internal caller's token belongs to fiID.
+func sameFI(w http.ResponseWriter, r *http.Request, fiID string) bool {
+	if caller, _ := r.Context().Value(internalFIKey{}).(string); caller == "" || caller != fiID {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "this token is not valid for FI "+fiID)
+		return false
+	}
+	return true
 }
 
 type demoUser struct {

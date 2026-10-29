@@ -49,7 +49,7 @@ func TestClassificationTable(t *testing.T) {
 				}
 			}))
 			defer srv.Close()
-			c := New(map[string]string{"lakeshore": srv.URL}, "tok")
+			c := New(map[string]string{"lakeshore": srv.URL}, map[string]string{"lakeshore": "tok", "prairie": "tok-p", "down": "tok-d"})
 			_, err := c.DraftChunk(context.Background(), "lakeshore", 100000, DraftChunkRequest{ChunkID: "g00-c00"})
 
 			var e *Error
@@ -76,7 +76,7 @@ func TestNetworkErrorsAndDeadlinesAreTransient(t *testing.T) {
 		time.Sleep(200 * time.Millisecond) // a hung Core
 	}))
 	defer srv.Close()
-	c := New(map[string]string{"lakeshore": srv.URL, "down": "http://127.0.0.1:1"}, "tok")
+	c := New(map[string]string{"lakeshore": srv.URL, "down": "http://127.0.0.1:1"}, map[string]string{"lakeshore": "tok", "prairie": "tok-p", "down": "tok-d"})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -89,7 +89,7 @@ func TestNetworkErrorsAndDeadlinesAreTransient(t *testing.T) {
 }
 
 func TestUnknownFIIsAContractError(t *testing.T) {
-	_, err := New(map[string]string{}, "tok").EnsureGenTxBatch(context.Background(), "nowhere", EnsureGenTxBatchRequest{})
+	_, err := New(map[string]string{}, map[string]string{"lakeshore": "tok", "prairie": "tok-p", "down": "tok-d"}).EnsureGenTxBatch(context.Background(), "nowhere", EnsureGenTxBatchRequest{})
 	var appErr *temporal.ApplicationError
 	if !errors.As(AsActivityError(err), &appErr) || appErr.Type() != model.ErrTypeCoreContract || !appErr.NonRetryable() {
 		t.Fatalf("got %v", err)
@@ -101,26 +101,43 @@ func TestBusinessOutcomesAreResults(t *testing.T) {
 		fmt.Fprint(w, `{"decision":"DENY","code":"DAILY_LIMIT_EXCEEDED","limitCents":1500000000,"usedCents":0,"requestedCents":1650000000}`)
 	}))
 	defer srv.Close()
-	got, err := New(map[string]string{"lakeshore": srv.URL}, "tok").CheckGroupPolicy(context.Background(), "lakeshore", 1, PolicyCheckRequest{})
+	got, err := New(map[string]string{"lakeshore": srv.URL}, map[string]string{"lakeshore": "tok", "prairie": "tok-p", "down": "tok-d"}).CheckGroupPolicy(context.Background(), "lakeshore", 1, PolicyCheckRequest{})
 	if err != nil || got.Decision != "DENY" || got.Code != "DAILY_LIMIT_EXCEEDED" {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
 
+// Each FI's calls go to that FI's Core, carrying that FI's token (and never another FI's).
 func TestEachFIGoesToItsOwnCore(t *testing.T) {
 	hits := map[string]int{}
+	tokens := map[string]string{}
 	mk := func(fi string) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hits[fi]++
+			tokens[fi] = r.Header.Get(InternalTokenHeader)
 			fmt.Fprint(w, `{"genTxBatchId":1,"created":true,"status":"Drafting"}`)
 		}))
 	}
 	l, p := mk("lakeshore"), mk("prairie")
 	defer l.Close()
 	defer p.Close()
-	c := New(map[string]string{"lakeshore": l.URL, "prairie": p.URL}, "tok")
+	c := New(map[string]string{"lakeshore": l.URL, "prairie": p.URL}, map[string]string{"lakeshore": "tok", "prairie": "tok-p", "down": "tok-d"})
 	_, _ = c.EnsureGenTxBatch(context.Background(), "prairie", EnsureGenTxBatchRequest{})
 	if hits["prairie"] != 1 || hits["lakeshore"] != 0 {
 		t.Fatalf("hits %v", hits)
+	}
+	if tokens["prairie"] != "tok-p" {
+		t.Fatalf("prairie's Core got token %q, want prairie's own", tokens["prairie"])
+	}
+}
+
+// Failure messages are stored unencrypted, so account-shaped numbers in Core's messages are masked on the way in.
+func TestCoreMessagesAreRedacted(t *testing.T) {
+	e := classify(http.StatusUnprocessableEntity, []byte(`{"code":"ACCOUNT_ON_HOLD","message":"account 4401220033 is on hold; routing 021000021"}`))
+	if e.Message != "account ••0033 is on hold; routing ••0021" {
+		t.Fatalf("message not redacted: %q", e.Message)
+	}
+	if got := classify(http.StatusConflict, []byte(`{"code":"GENTX_BATCH_CLOSED","message":"batch 100014 is closed"}`)).Message; got != "batch 100014 is closed" {
+		t.Fatalf("short numbers must stay readable: %q", got)
 	}
 }

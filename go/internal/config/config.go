@@ -7,6 +7,7 @@
 package config
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"os"
@@ -53,8 +54,25 @@ type Defaults struct {
 // Core is how Go services reach each FI's own Core.
 type Core struct {
 	Endpoints             map[string]string // fiId -> base URL (one Core per FI)
-	InternalToken         string
+	InternalTokens        map[string]string // fiId -> that FI's service-to-service token
 	AlertAttemptThreshold int
+}
+
+// TokenFor returns the internal token for calls to (or on behalf of) one FI.
+func (h Core) TokenFor(fiID string) string { return h.InternalTokens[fiID] }
+
+// FIForToken returns the FI whose internal token this is. WHY per FI: each Core holds only its own FI's token,
+// so a callback from one FI's Core can never act on another FI's batches.
+func (h Core) FIForToken(token string) (string, bool) {
+	if token == "" {
+		return "", false
+	}
+	for fi, t := range h.InternalTokens {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(t)) == 1 {
+			return fi, true
+		}
+	}
+	return "", false
 }
 
 // Config is the union of every setting; each binary uses the parts it needs and calls the matching
@@ -106,7 +124,7 @@ func Load() (Config, error) {
 		},
 		Core: Core{
 			Endpoints:             r.endpoints("CORE_ENDPOINTS"),
-			InternalToken:         r.str("INTERNAL_TOKEN", ""),
+			InternalTokens:        r.pairs("INTERNAL_TOKENS", "fiId=token"),
 			AlertAttemptThreshold: r.integer("CORE_RETRY_ALERT_THRESHOLD", 5),
 		},
 		KeyringPath:    r.str("CODEC_KEYRING_PATH", "/config/keyring.json"),
@@ -124,8 +142,17 @@ func (c Config) RequireCore() error {
 	if len(c.Core.Endpoints) == 0 {
 		errs = append(errs, errors.New("CORE_ENDPOINTS is required (e.g. lakeshore=http://core-lakeshore:8080)"))
 	}
-	if c.Core.InternalToken == "" {
-		errs = append(errs, errors.New("INTERNAL_TOKEN is required"))
+	seen := map[string]string{}
+	for _, fi := range c.Core.FiIDs() {
+		t := c.Core.InternalTokens[fi]
+		switch {
+		case t == "":
+			errs = append(errs, fmt.Errorf("INTERNAL_TOKENS has no token for FI %q", fi))
+		case seen[t] != "":
+			errs = append(errs, fmt.Errorf("INTERNAL_TOKENS: FIs %q and %q share a token; each FI needs its own", seen[t], fi))
+		default:
+			seen[t] = fi
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -209,14 +236,23 @@ func (r *reader) list(key, def string) []string {
 
 // endpoints parses "fi1=url1,fi2=url2".
 func (r *reader) endpoints(key string) map[string]string {
+	out := r.pairs(key, "fiId=url")
+	for fi, url := range out {
+		out[fi] = strings.TrimRight(url, "/")
+	}
+	return out
+}
+
+// pairs parses "fiId=value,fiId=value".
+func (r *reader) pairs(key, form string) map[string]string {
 	out := map[string]string{}
 	for _, pair := range r.list(key, "") {
-		fi, url, ok := strings.Cut(pair, "=")
-		if !ok || strings.TrimSpace(fi) == "" || strings.TrimSpace(url) == "" {
-			r.errs = append(r.errs, fmt.Errorf("%s: %q is not fiId=url", key, pair))
+		fi, v, ok := strings.Cut(pair, "=")
+		if !ok || strings.TrimSpace(fi) == "" || strings.TrimSpace(v) == "" {
+			r.errs = append(r.errs, fmt.Errorf("%s: an entry is not %s", key, form)) // never echo a token
 			continue
 		}
-		out[strings.TrimSpace(fi)] = strings.TrimRight(strings.TrimSpace(url), "/")
+		out[strings.TrimSpace(fi)] = strings.TrimSpace(v)
 	}
 	return out
 }

@@ -1,10 +1,10 @@
-// JSON contracts for approvals (portal) and the callback Core sends to bulkwire-service when a batch is
-// fully approved or denied.
+// JSON contracts for approvals (portal), the callbacks Core sends to bulkwire-service when a batch is fully
+// approved or denied, and the staged-batch lookup Core uses before a batch has been drafted.
 namespace CoreApi.Contracts;
 
-// amountCents/rowCount/initiatedBy come from the staging summary for approve-before-draft (no GenTxBatch
-// exists yet). PRODUCTION NOTE: a real core computes these itself.
-public sealed record ApproveRequest(string BatchId, string Tac, long AmountCents, int RowCount, string InitiatedBy);
+// WHY only the batch ID and the code: the amount and initiator that drive limits and dual control are never
+// taken from the browser. Core uses its own batch record, or before the draft, the server-side staged batch.
+public sealed record ApproveRequest(string BatchId, string Tac);
 public sealed record DenyRequest(string BatchId, string? Reason);
 
 public sealed record Signature(string UserId, string DisplayName, DateTime SignedAt);
@@ -17,7 +17,8 @@ public sealed record ApprovalRecord(
     string? DeniedBy,
     string? DenyReason,
     DateTime? CompletedAt,
-    IReadOnlyList<Signature> Signatures);
+    IReadOnlyList<Signature> Signatures,
+    string? CustomerId);
 
 public static class OrchestrationOutcome
 {
@@ -53,3 +54,7 @@ public static class ApprovalResponses
 public sealed record ApprovedCallback(string FiId, string BatchId, string ApprovalRef, IReadOnlyList<CallbackApprover> Approvers, DateTime ApprovedAt);
 public sealed record CallbackApprover(string UserId, string DisplayName, DateTime SignedAt);
 public sealed record DeniedCallback(string FiId, string BatchId, string DeniedBy, string? Reason);
+
+// bulkwire-service /internal/staged-batches/{fiId}/{batchId}: the staged batch's owner and totals, from the
+// immutable staging manifest.
+public sealed record StagedBatch(string BatchId, string CustomerId, string UploadedBy, string Status, int RowCount, long AmountCents);

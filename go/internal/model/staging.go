@@ -6,7 +6,10 @@
 // identifiers for Core; anything displayed or logged uses MaskAccount.
 package model
 
-import "time"
+import (
+	"regexp"
+	"time"
+)
 
 // WireRow is one valid, parsed wire as staged in the claim-check store. Activities read these; the
 // workflow never does.
@@ -105,6 +108,17 @@ func GroupKey(originatingAccount, processDate string) string {
 // MaskAccount renders an account number for display: "4401220033" -> "••0033". Full numbers never appear
 // in Search Attributes, Workflow IDs, logs, or timeline text.
 func MaskAccount(account string) string { return "••" + AccountLast4(account) }
+
+// longDigitRun matches account- and routing-number-shaped runs: 8 or more digits not inside a longer word.
+var longDigitRun = regexp.MustCompile(`\b\d{8,}\b`)
+
+// RedactAccountNumbers masks every account- or routing-number-shaped run of digits in free text ("account
+// 4401220033 ..." -> "account ••0033 ..."). WHY: failure messages are not payloads, so they are NOT encrypted
+// (the Temporal Service stores them in plaintext). Core already masks its own messages; this is the guard at
+// the boundary in case a future message does not.
+func RedactAccountNumbers(text string) string {
+	return longDigitRun.ReplaceAllStringFunc(text, MaskAccount)
+}
 
 // AccountLast4 returns the last four characters of an account number (for "ending 0033" messages).
 func AccountLast4(account string) string {

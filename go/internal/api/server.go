@@ -88,6 +88,7 @@ func (s *Server) Routes() http.Handler {
 	// Internal (service-to-service)
 	mux.HandleFunc("POST /internal/approvals", s.internal(s.internalApproval))
 	mux.HandleFunc("POST /internal/denials", s.internal(s.internalDenial))
+	mux.HandleFunc("GET /internal/staged-batches/{fiId}/{batchId}", s.internal(s.internalStagedBatch))
 	mux.HandleFunc("GET /internal/draft-defaults", s.internal(s.getDraftDefaults)) // DEMO-ONLY
 	mux.HandleFunc("PUT /internal/draft-defaults", s.internal(s.putDraftDefaults)) // DEMO-ONLY
 

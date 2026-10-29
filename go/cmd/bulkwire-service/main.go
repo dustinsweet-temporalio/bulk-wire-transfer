@@ -61,7 +61,7 @@ func run(log *slog.Logger) error {
 	}
 
 	srv := &api.Server{
-		Log: log, Temporal: c, Store: store, Core: coreclient.New(cfg.Core.Endpoints, cfg.Core.InternalToken),
+		Log: log, Temporal: c, Store: store, Core: coreclient.New(cfg.Core.Endpoints, cfg.Core.InternalTokens),
 		Tokens: auth.NewTokens(cfg.AuthSigningKey), Cfg: cfg, Defaults: api.NewDraftDefaults(cfg), Now: time.Now,
 	}
 	httpSrv := &http.Server{Addr: ":8090", Handler: srv.Routes(), ReadHeaderTimeout: 10 * time.Second}

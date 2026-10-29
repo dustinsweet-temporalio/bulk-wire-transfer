@@ -85,8 +85,8 @@ export const api = {
   setHold: (accountNumber: string, onHold: boolean, reason: string) =>
     request<Account>(core(`/accounts/${accountNumber}/hold`), post({ onHold, reason })),
   approval: (batchId: string) => request<Approval>(core(`/approvals/${batchId}`)),
-  approve: (batchId: string, tac: string, amountCents: number, rowCount: number, initiatedBy: string) =>
-    request<Approval>(core("/approvals"), post({ batchId, tac, amountCents, rowCount, initiatedBy })),
+  // Only the batch and the code: Core takes the amount and initiator from its own records, never from the browser.
+  approve: (batchId: string, tac: string) => request<Approval>(core("/approvals"), post({ batchId, tac })),
   deny: (batchId: string, reason: string) => request<Approval>(core("/approvals/deny"), post({ batchId, reason })),
   genTxBatch: (batchId: string) => request<GenTxBatch>(core(`/gentx-batches/by-external/${batchId}`)),
   wires: (genTxBatchId: number, status: string, offset: number, limit: number) =>

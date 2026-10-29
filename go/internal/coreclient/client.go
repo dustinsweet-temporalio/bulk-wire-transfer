@@ -29,13 +29,14 @@ const InternalTokenHeader = "X-Internal-Token"
 // Client calls the right FI's core-api.
 type Client struct {
 	endpoints map[string]string
-	token     string
+	tokens    map[string]string
 	http      *http.Client
 }
 
-// New builds a client from fiId -> base URL and the internal token.
-func New(endpoints map[string]string, internalToken string) *Client {
-	return &Client{endpoints: endpoints, token: internalToken, http: &http.Client{}}
+// New builds a client from fiId -> base URL and fiId -> internal token. Each call sends the token of the FI it
+// calls, and each Core accepts only its own FI's token.
+func New(endpoints, internalTokens map[string]string) *Client {
+	return &Client{endpoints: endpoints, tokens: internalTokens, http: &http.Client{}}
 }
 
 // FiIDs lists the FIs this client knows.
@@ -124,7 +125,7 @@ func (c *Client) Do(ctx context.Context, fiID, method, path string, body, out an
 		return &Error{Kind: Contract, Code: "CORE_CONTRACT", Message: err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(InternalTokenHeader, c.token)
+	req.Header.Set(InternalTokenHeader, c.tokens[fiID])
 
 	resp, err := c.http.Do(req)
 	if err != nil {

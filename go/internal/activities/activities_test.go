@@ -72,7 +72,7 @@ func TestInsertDraftChunkReadsOnlyItsPagesAndSendsExactlyItsRows(t *testing.T) {
 	}))
 	defer core.Close()
 
-	acts := &Activities{Core: coreclient.New(map[string]string{"lakeshore": core.URL}, "tok"), ClaimCheck: store, AlertAttemptThreshold: 5}
+	acts := &Activities{Core: coreclient.New(map[string]string{"lakeshore": core.URL}, map[string]string{"lakeshore": "tok"}), ClaimCheck: store, AlertAttemptThreshold: 5}
 	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
 	env.RegisterActivity(acts)
 
@@ -102,7 +102,7 @@ func TestInsertDraftChunkReadsOnlyItsPagesAndSendsExactlyItsRows(t *testing.T) {
 }
 
 func TestMissingStagedDataParksAndStoreOutageRetries(t *testing.T) {
-	acts := &Activities{Core: coreclient.New(nil, "tok"), ClaimCheck: claimcheck.NewMemory()}
+	acts := &Activities{Core: coreclient.New(nil, nil), ClaimCheck: claimcheck.NewMemory()}
 	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
 	env.RegisterActivity(acts)
 	_, err := env.ExecuteActivity(acts.PlanChunks, PlanInput{FiID: "lakeshore", BatchID: "gone", ChunkSize: 250})
@@ -145,7 +145,7 @@ func TestPolicyDenyIsAResult(t *testing.T) {
 		fmt.Fprint(w, `{"decision":"DENY","code":"DAILY_LIMIT_EXCEEDED","limitCents":1500000000,"usedCents":280000000,"requestedCents":1650000000}`)
 	}))
 	defer core.Close()
-	acts := &Activities{Core: coreclient.New(map[string]string{"lakeshore": core.URL}, "tok")}
+	acts := &Activities{Core: coreclient.New(map[string]string{"lakeshore": core.URL}, map[string]string{"lakeshore": "tok"})}
 	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
 	env.RegisterActivity(acts)
 	val, err := env.ExecuteActivity(acts.CheckGroupPolicy, PolicyInput{FiID: "lakeshore", GenTxBatchID: 1})

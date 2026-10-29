@@ -140,7 +140,8 @@ func Catalog() []Info {
 	return out
 }
 
-// Generate renders a sample as CSV with process dates relative to today (UTC date).
+// Generate renders a sample as CSV with process dates relative to `today` (pass the FI's local date, as from
+// auth.LocalToday; only its calendar date is used).
 func Generate(name string, today time.Time) ([]byte, error) {
 	for _, s := range specs {
 		if s.info.Name == name {

@@ -122,7 +122,7 @@ the orchestrator, and manual clean-up runbooks.
    http://localhost:8089`. Without `--detailed` the CLI lists event types only, not payloads.
 4. Batches → **Temporal UI**: summary and details, every chunk Activity with its summary, the `draft`/`authorize`/
    `resolve` Updates with who and when, the "Approval window" timer, current details.
-5. Batches table: an authorized 5,000-wire batch is ~340 events and about 85 KB of history; the ~2 MB of staged
+5. Batches table: an authorized 5,000-wire batch is ~320 events and about 85 KB of history; the ~2 MB of staged
    rows never enter it.
 
 After the demo, `make demo-reset` first (it terminates batches encrypted with the temporary key), then restore the

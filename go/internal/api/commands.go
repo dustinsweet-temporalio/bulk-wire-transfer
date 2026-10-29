@@ -207,8 +207,15 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request, c auth.Claims) {
 		return
 	}
 	wfID := temporalx.WorkflowID(c.FiID, r.PathValue("batchId"))
-	if v, ok := s.queryView(r.Context(), wfID); ok && v.CustomerID != c.CustomerID {
+	// WHY Describe and not the status Query: ownership must be checked even when no worker can answer a Query.
+	// The CustomerId Search Attribute is set when the execution starts and never changes.
+	desc, err := s.Temporal.DescribeWorkflowExecution(r.Context(), wfID, "")
+	var notFound *serviceerror.NotFound
+	if errors.As(err, &notFound) || (err == nil && searchAttributes(desc.GetWorkflowExecutionInfo().GetSearchAttributes()).customerID != c.CustomerID) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "batch not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "ORCHESTRATION_UNAVAILABLE", "Batch status is temporarily unavailable. Try again.")
 		return
 	}
 	view, err := s.update(r.Context(), wfID, workflow.UpdateCancel, key, workflow.CancelRequest{By: c.UserID(), Reason: body.Reason})
@@ -269,6 +276,9 @@ func (s *Server) internalApproval(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "fiId, batchId and approvalRef are required")
 		return
 	}
+	if !sameFI(w, r, body.FiID) {
+		return
+	}
 	m, err := staging.ReadManifest(r.Context(), s.Store, body.FiID, body.BatchID)
 	if errors.Is(err, claimcheck.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no staged batch with that id")
@@ -306,6 +316,9 @@ func (s *Server) internalDenial(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "fiId and batchId are required")
 		return
 	}
+	if !sameFI(w, r, body.FiID) {
+		return
+	}
 	wfID := temporalx.WorkflowID(body.FiID, body.BatchID)
 	view, err := s.update(r.Context(), wfID, workflow.UpdateDeny, "deny-"+body.BatchID,
 		workflow.DenyRequest{DeniedBy: body.DeniedBy, Reason: body.Reason})
@@ -319,4 +332,27 @@ func (s *Server) internalDenial(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": "DENY_DELIVERED", "workflowId": wfID, "phase": view.Phase})
+}
+
+// internalStagedBatch: what Core needs to decide an approval (or denial) that arrives before the draft: who the
+// batch belongs to, who uploaded it, and its totals, all from the immutable staging manifest.
+// WHY: before the draft, Core has no batch record of its own. The amount that drives approval limits and dual
+// control must come from the server-side manifest, never from the approver's browser.
+func (s *Server) internalStagedBatch(w http.ResponseWriter, r *http.Request) {
+	fiID, batchID := r.PathValue("fiId"), r.PathValue("batchId")
+	if !sameFI(w, r, fiID) {
+		return
+	}
+	m, err := staging.ReadManifest(r.Context(), s.Store, fiID, batchID)
+	if errors.Is(err, claimcheck.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "no staged batch with that id")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "CLAIM_CHECK_UNAVAILABLE", "staged data is temporarily unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"batchId": m.BatchID, "customerId": m.CustomerID, "uploadedBy": m.UploadedBy, "status": m.Status,
+		"rowCount": m.ValidRowCount, "amountCents": m.TotalAmountCents,
+	})
 }

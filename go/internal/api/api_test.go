@@ -140,7 +140,7 @@ func newTestServer(t *testing.T, f *fakeTemporal) (*Server, http.Handler) {
 		Temporal:       config.Temporal{Namespace: "bulkwire", TaskQueue: "bulkwire", UIURL: "http://localhost:8233"},
 		ClaimCheck:     config.ClaimCheck{PageSize: 500},
 		Defaults:       config.Defaults{ChunkSize: 250, Concurrency: 2, MaxRows: 10000, ApprovalWindow: 24 * time.Hour, RetryBudget: 30 * time.Minute, RetryMaxInterval: 20 * time.Second},
-		Core:           config.Core{Endpoints: map[string]string{"lakeshore": "x", "prairie": "y"}, InternalToken: "itok"},
+		Core:           config.Core{Endpoints: map[string]string{"lakeshore": "x", "prairie": "y"}, InternalTokens: map[string]string{"lakeshore": "itok-l", "prairie": "itok-p"}},
 		AuthSigningKey: testKey, DemoPassword: "demo",
 	}
 	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Temporal: f, Store: claimcheck.NewMemory(), Core: activeCore{},
@@ -330,7 +330,7 @@ func TestDuplicateApprovalCallbackAfterCompletionIsSuccess(t *testing.T) {
 	batch := stage(t, h, token(t, "lakeshore", "SUMMIT", "jordan"), "summit-payroll-5000")
 	body := fmt.Sprintf(`{"fiId":"lakeshore","batchId":%q,"approvalRef":"APR-X"}`, batch)
 	req := httptest.NewRequest(http.MethodPost, "/internal/approvals", bytes.NewBufferString(body))
-	req.Header.Set("X-Internal-Token", s.Cfg.Core.InternalToken)
+	req.Header.Set("X-Internal-Token", s.Cfg.Core.TokenFor("lakeshore"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte("ALREADY_APPLIED")) {
@@ -348,7 +348,7 @@ func TestDraftDefaultsValidation(t *testing.T) {
 	s, h := newTestServer(t, &fakeTemporal{})
 	put := func(body string) int {
 		req := httptest.NewRequest(http.MethodPut, "/internal/draft-defaults", bytes.NewBufferString(body))
-		req.Header.Set("X-Internal-Token", s.Cfg.Core.InternalToken)
+		req.Header.Set("X-Internal-Token", s.Cfg.Core.TokenFor("lakeshore"))
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec.Code
@@ -361,6 +361,58 @@ func TestDraftDefaultsValidation(t *testing.T) {
 	}
 	if c := put(`{"lakeshore":{"chunkSize":10,"concurrency":4,"approvalWindow":"2m","retryBudget":"60s","retryMaxInterval":"5s"}}`); c != 400 {
 		t.Fatalf("invalid chunk size accepted: %d", c)
+	}
+	if c := put(`{"prairie":{"chunkSize":250,"concurrency":4,"approvalWindow":"2m","retryBudget":"60s","retryMaxInterval":"5s"}}`); c != 403 {
+		t.Fatalf("lakeshore's token changed prairie's defaults: %d", c)
+	}
+}
+
+// Each FI's Core holds only its own token, so internal calls are accepted only for that FI.
+func TestInternalCallsAreScopedToTheTokensFI(t *testing.T) {
+	s, h := newTestServer(t, &fakeTemporal{})
+	batch := stage(t, h, token(t, "lakeshore", "SUMMIT", "jordan"), "summit-payroll-5000")
+	call := func(method, path, body, fi string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		req.Header.Set("X-Internal-Token", s.Cfg.Core.TokenFor(fi))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	approval := fmt.Sprintf(`{"fiId":"lakeshore","batchId":%q,"approvalRef":"APR-X"}`, batch)
+	if rec := call(http.MethodPost, "/internal/approvals", approval, "prairie"); rec.Code != http.StatusForbidden {
+		t.Fatalf("prairie's token approved a lakeshore batch: %d", rec.Code)
+	}
+	denial := fmt.Sprintf(`{"fiId":"lakeshore","batchId":%q,"deniedBy":"x"}`, batch)
+	if rec := call(http.MethodPost, "/internal/denials", denial, "prairie"); rec.Code != http.StatusForbidden {
+		t.Fatalf("prairie's token denied a lakeshore batch: %d", rec.Code)
+	}
+	if rec := call(http.MethodGet, "/internal/staged-batches/lakeshore/"+batch, "", "prairie"); rec.Code != http.StatusForbidden {
+		t.Fatalf("prairie's token read a lakeshore batch: %d", rec.Code)
+	}
+	rec := call(http.MethodGet, "/internal/staged-batches/lakeshore/"+batch, "", "lakeshore")
+	var got struct {
+		CustomerID  string `json:"customerId"`
+		UploadedBy  string `json:"uploadedBy"`
+		RowCount    int    `json:"rowCount"`
+		AmountCents int64  `json:"amountCents"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if rec.Code != 200 || got.CustomerID != "summit-logistics" || got.UploadedBy != "jordan" || got.RowCount != 5000 || got.AmountCents <= 0 {
+		t.Fatalf("staged batch: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Cancel checks ownership from the CustomerId Search Attribute (Describe), so it holds even when no worker can
+// answer the status Query.
+func TestCancelChecksOwnershipWithoutAWorker(t *testing.T) {
+	cust, _ := converter.GetDefaultDataConverter().ToPayload("northline-medical")
+	f := &fakeTemporal{queryErr: context.DeadlineExceeded, describe: &workflowservice.DescribeWorkflowExecutionResponse{
+		WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{SearchAttributes: searchAttrs(map[string]*commonpb.Payload{"CustomerId": cust})},
+	}}
+	_, h := newTestServer(t, f)
+	rec := do(h, http.MethodPost, "/api/batches/01JOTHER/cancel", token(t, "lakeshore", "SUMMIT", "jordan"), map[string]string{"Idempotency-Key": "k1"})
+	if rec.Code != http.StatusNotFound || f.lastUpdate.UpdateName != "" {
+		t.Fatalf("cancel of another customer's batch: %d, update sent: %q", rec.Code, f.lastUpdate.UpdateName)
 	}
 }
 

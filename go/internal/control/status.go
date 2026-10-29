@@ -99,7 +99,7 @@ func (s *Service) status(w http.ResponseWriter, r *http.Request) {
 	})
 	run(func(ctx context.Context) {
 		var d any
-		if err := s.bulkwire(r.WithContext(ctx), http.MethodGet, "/internal/draft-defaults", nil, &d); err == nil {
+		if err := s.bulkwire(r.WithContext(ctx), s.Cfg.Core.FiIDs()[0], http.MethodGet, "/internal/draft-defaults", nil, &d); err == nil {
 			set("draftDefaults", d)
 		}
 	})

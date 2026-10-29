@@ -87,7 +87,7 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	core := coreclient.New(cfg.Core.Endpoints, cfg.Core.InternalToken)
+	core := coreclient.New(cfg.Core.Endpoints, cfg.Core.InternalTokens)
 	for _, fi := range cfg.Core.FiIDs() {
 		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		if err := core.Healthz(hctx, fi); err != nil {

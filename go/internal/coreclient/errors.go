@@ -73,6 +73,8 @@ func classify(status int, body []byte) *Error {
 	if payload.Message == "" {
 		payload.Message = http.StatusText(status)
 	}
+	// Core's message becomes a Temporal failure message, which is stored unencrypted: keep it free of PII.
+	payload.Message = model.RedactAccountNumbers(payload.Message)
 	e := &Error{HTTPStatus: status, Code: payload.Code, Message: payload.Message}
 	switch {
 	case status >= 500, status == http.StatusTooManyRequests, status == http.StatusRequestTimeout:
