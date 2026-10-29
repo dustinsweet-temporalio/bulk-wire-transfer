@@ -29,6 +29,22 @@ make urls
 | Codec Server | http://localhost:8089 |
 | Worker metrics | http://localhost:9464/metrics, http://localhost:9465/metrics |
 
+## Demo secrets: replace before any real use
+
+Everything secret in this repository is a **public, throwaway demo value**, committed on purpose so the demo runs
+with no setup. Anyone can read it, so treat it as already compromised:
+
+- `config/keyring.json`: the AES-256 key that encrypts every Temporal payload. Anyone with this file can decrypt
+  any history produced with it. In production, keys come from a KMS or HSM (envelope encryption), are never
+  committed, and are rotated (the Codec Server and workers read the keyring; see `go/internal/codec`).
+- `.env`: the portal token signing key, the per-FI service-to-service tokens, the SQL Server `sa` password, and the
+  S3 credentials. In production these come from a secret manager, and service-to-service calls use mTLS or
+  workload identity instead of shared tokens.
+- The demo sign-in (password `demo`, security code `246810`) stands in for the bank's identity provider and MFA.
+
+This is a reference implementation for learning and demos, not a production system. Each place a real
+deployment would differ is marked `PRODUCTION NOTE:` in the code.
+
 ## Users
 
 Password for everyone: **`demo`**. Security code (TAC) for approvals: **`246810`**.
@@ -63,7 +79,7 @@ longer publishes images), or GCS (fake-gcs-server). The backend is used only as 
 ## Tests
 
 ```bash
-make test          # Go (unit + workflow W1–W15), .NET, and UI tests, each in its pinned container
+make test          # Go (unit + workflow W1–W18), .NET, and UI tests, each in its pinned container
 make e2e           # end-to-end checks against a running stack (~15 min)
 make replay        # replay captured histories against the current workflow code
 make replay-nde    # shows a non-determinism error from a reordered workflow (fails on purpose)
@@ -111,3 +127,7 @@ and its tests), `sql/` (schema, TVP types, procedures, seeds), `ui/` (FI portal)
 - [docs/RUNBOOK-DEMO.md](docs/RUNBOOK-DEMO.md) — cheat sheet and scenarios A–F
 - [docs/FAILURE-CATALOG.md](docs/FAILURE-CATALOG.md) — F01–F44 with click paths
 - [docs/VERSIONS.md](docs/VERSIONS.md) — every pinned version
+
+## License
+
+[MIT](LICENSE). All institutions, people, companies, and data in this repository are fictional.
