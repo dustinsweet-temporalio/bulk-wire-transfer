@@ -101,6 +101,11 @@ and its tests), `sql/` (schema, TVP types, procedures, seeds), `ui/` (FI portal)
 ## Documentation
 
 - [docs/DEMO-GUIDE-HAPPY-PATH.md](docs/DEMO-GUIDE-HAPPY-PATH.md) — step-by-step presenter guide, starting from a fresh laptop (happy path)
+- [docs/DEMO-GUIDE-FAILURES.md](docs/DEMO-GUIDE-FAILURES.md) — part 2: Core outage mid-draft, then an account hold fixed by bank operations
+- [docs/DEMO-GUIDE-PAYROLL-DAY.md](docs/DEMO-GUIDE-PAYROLL-DAY.md) — part 3: three big batches at once; a per-bank rate limit enforced by Temporal
+- [docs/DEMO-GUIDE-CHAOS.md](docs/DEMO-GUIDE-CHAOS.md) — part 4: crash, stop, restart, and freeze every moving part during a 10,000-wire draft
+- [docs/DEMO-GUIDE-PRODUCTION.md](docs/DEMO-GUIDE-PRODUCTION.md) — part 5: payload encryption and key rotation; shipping (and fixing) a workflow bug
+- [docs/DEMO-GUIDE-CATALOG.md](docs/DEMO-GUIDE-CATALOG.md) — part 6: one-minute recipes for the rest of the failure catalog, and an F01–F44 index
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — topology, services, the life of a batch, what is deliberately absent
 - [docs/TRACEABILITY.md](docs/TRACEABILITY.md) — every pattern and design rule mapped to code
 - [docs/RUNBOOK-DEMO.md](docs/RUNBOOK-DEMO.md) — cheat sheet and scenarios A–F

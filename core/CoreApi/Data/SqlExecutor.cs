@@ -18,10 +18,12 @@ public sealed class SqlExecutor(CoreOptions options)
         Func<SqlDataReader, CancellationToken, Task<T>> read,
         CancellationToken ct)
     {
+        var opened = false;
         try
         {
             await using var connection = new SqlConnection(options.ConnectionString);
             await connection.OpenAsync(ct);
+            opened = true;
             await using var command = new SqlCommand(procedure, connection)
             {
                 CommandType = CommandType.StoredProcedure,
@@ -30,6 +32,13 @@ public sealed class SqlExecutor(CoreOptions options)
             bind(command.Parameters);
             await using var reader = await command.ExecuteReaderAsync(ct);
             return await read(reader, ct);
+        }
+        catch (SqlException ex) when (!opened)
+        {
+            // WHY: failing to open a connection is never a business rule, whatever number SqlClient reports
+            // (a stopped container's host name stops resolving, and the managed network layer's numbers vary
+            // by platform). Treat it as "database unavailable" so it is retried and labelled as such.
+            throw new CoreException(503, "CORE_UNAVAILABLE", "Core database is temporarily unavailable", true, ex);
         }
         catch (SqlException ex)
         {

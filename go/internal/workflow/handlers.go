@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"go.temporal.io/sdk/workflow"
 )
@@ -92,7 +93,8 @@ func (s *batchState) handleAuthorize(ctx workflow.Context, req AuthorizeRequest)
 		for i, a := range req.Approvers {
 			names[i] = a.DisplayName
 		}
-		s.addTimeline(ctx, EvAuthorizationReceived, fmt.Sprintf("%s · approved by %v", req.ApprovalRef, names))
+		// WHY " and ": display names already contain commas ("Alex Rivera, Controller").
+		s.addTimeline(ctx, EvAuthorizationReceived, fmt.Sprintf("%s · approved by %s", req.ApprovalRef, strings.Join(names, " and ")))
 	}
 	return s.view(), nil
 }

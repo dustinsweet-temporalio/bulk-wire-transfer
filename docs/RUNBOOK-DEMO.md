@@ -80,14 +80,16 @@ hit the same hold again, and a separate approval workflow.
 
 ## C. Payroll day: two people, one Core (4 min) — F36, F08
 
-1. Control Center → Core load & fairness. Leave the limit OFF.
+1. Control Center → Core load & fairness (keep this page open: the charts only record while it is). Limit OFF.
 2. **Launch payroll day** (Jordan/Summit 10k + Taylor/Northline 10k at Lakeshore, Riley/Harvest 6k at Prairie,
-   concurrency 4). Or do it by hand in three windows.
-3. Show the Lakeshore chart: calls/s and in-flight rise with each batch.
-4. Set rps per FI = **3** → **Enable limit**. Lakeshore flattens at 3 calls/s (~2 in flight at 600 ms latency)
-   while both Lakeshore batches keep progressing; Prairie is unaffected.
-5. Optional (F08): F01 outage on Lakeshore; Prairie keeps going.
-6. **Remove limit**.
+   concurrency 4). Lakeshore runs at 12–15 calls/s with 8 in flight; all three batches are drafted in about 10 s.
+3. **Reset demo** (it removes the limit), then rps per FI = **3** → **Enable limit** → **Launch payroll day** again.
+   Lakeshore stays flat at 3 calls/s (~2 in flight at 600 ms latency) and both Lakeshore batches progress side by
+   side (~35 s); Prairie runs on its own 3/s allowance and finishes in ~10 s, not queued behind Lakeshore's backlog.
+   (The limit cannot be shown mid-run: without it the batches finish before you can click.)
+4. Optional (F08): Reset; upload at both banks; F08 → **Outage 120 s (Lakeshore)**; draft both. Prairie drafts in
+   ~5 s while Lakeshore retries.
+5. **Remove limit** (or Reset).
 
 Close with: *What happened* — two big batches from two customers of one bank shared that bank's Core capacity, and
 the other bank never noticed. *Which primitive* — Fairness keyed by FI plus a per-key rate limit, enforced by the
@@ -95,8 +97,10 @@ Temporal Service. *What you no longer need* — custom throttling and cross-batc
 
 ## D. Chaos tour (4 min) — F12, F13, F15, F10, F16
 
-1. Jordan: upload **summit-payroll-10000** → Save as draft (Core load & fairness → Lakeshore latency 1500 ms so it lasts).
-2. Control Center → Overview: **kill** worker-a. Tiles pause briefly, then continue on worker-b.
+1. Jordan: upload **summit-payroll-10000** → Save as draft (Core load & fairness → Lakeshore latency **5000** ms
+   so it lasts; at 1500 ms the draft finishes during step 2). Run the steps back to back without waiting for each
+   to recover.
+2. F12 → **Kill worker-a**. Tiles running on worker-a stall until StartToClose (60 s), then continue on worker-b.
 3. F13 → **Stop both workers 60 s**. Portal: "Live progress is temporarily unavailable. Your batch is safe…";
    Draft clicks say try again. They restart automatically; the batch resumes exactly where it stopped.
 4. Overview: **restart** temporal. A few seconds of pause; everything resumes.
@@ -114,12 +118,15 @@ the orchestrator, and manual clean-up runbooks.
 1. Control Center → Encryption → pick a batch → **Inspect**: left is what the Temporal Service stores
    (`binary/encrypted`, key `k2026a`), right is the decoded payload.
 2. **Rotate key**. Draft a new batch; inspect it: the new key id. Inspect the old batch: still decodes.
-3. CLI: `temporal workflow show -n bulkwire -w <id>` (ciphertext) vs `… --codec-endpoint http://localhost:8089`.
+3. CLI: `temporal workflow show -n bulkwire -w <id> --detailed` (ciphertext) vs `… --detailed --codec-endpoint
+   http://localhost:8089`. Without `--detailed` the CLI lists event types only, not payloads.
 4. Batches → **Temporal UI**: summary and details, every chunk Activity with its summary, the `draft`/`authorize`/
    `resolve` Updates with who and when, the "Approval window" timer, current details.
-5. Batches table: a 5,000-wire batch is ~300 events and about 100 KB of history; the 3.8 MB of rows never enter it.
+5. Batches table: an authorized 5,000-wire batch is ~340 events and about 85 KB of history; the ~2 MB of staged
+   rows never enter it.
 
-After the demo, restore the committed keyring: `git checkout config/keyring.json` (then `make demo-reset`).
+After the demo, `make demo-reset` first (it terminates batches encrypted with the temporary key), then restore the
+committed keyring: `git checkout config/keyring.json`.
 
 Close with: *What happened* — the orchestrator only ever saw ciphertext, yet engineers can read every batch end to
 end. *Which primitive* — an encrypting DataConverter with a Codec Server, plus a claim check. *What you no longer

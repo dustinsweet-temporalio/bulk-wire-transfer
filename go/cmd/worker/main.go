@@ -104,6 +104,11 @@ func run(log *slog.Logger) error {
 		// Workflow Task response, bypassing the task queue's matching service. Fairness and the per-FI rate
 		// limit are enforced by matching, so every Core Activity must be dispatched through the task queue.
 		DisableEagerActivities: true,
+		// WHY 8 s: on SIGTERM the worker stops polling and lets in-flight Core calls finish and report, inside
+		// Docker's 10 s stop grace period. The SDK default (0) cancels them at once, so each one would sit until
+		// its 60 s StartToClose before being retried elsewhere, which is crash behavior, not a graceful drain.
+		// PRODUCTION NOTE: size this to your slowest normal Activity and the platform's termination grace period.
+		WorkerStopTimeout: 8 * time.Second,
 	}
 	register := sdkworkflow.RegisterOptions{Name: workflow.WorkflowName}
 	if cfg.Temporal.VersioningEnabled {

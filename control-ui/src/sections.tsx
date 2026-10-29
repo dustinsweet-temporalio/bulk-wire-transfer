@@ -282,8 +282,8 @@ export function Encryption() {
       </Card>
       <Card title="Temporal UI and CLI">
         <p>The Web UI decodes through the Codec Server (<span className="mono">--ui-codec-endpoint http://localhost:8089</span>). In the CLI compare:</p>
-        <pre>{`temporal workflow show -n bulkwire -w <workflowId>                                         # ciphertext
-temporal workflow show -n bulkwire -w <workflowId> --codec-endpoint http://localhost:8089  # decoded`}</pre>
+        <pre>{`temporal workflow show -n bulkwire -w <workflowId> --detailed                                         # ciphertext
+temporal workflow show -n bulkwire -w <workflowId> --detailed --codec-endpoint http://localhost:8089  # decoded`}</pre>
       </Card>
     </div>
   );

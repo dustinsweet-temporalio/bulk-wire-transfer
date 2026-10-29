@@ -29,7 +29,7 @@ export function LiveDetail({ status }: { status: BatchStatus }) {
   if (!view) {
     return (
       <div className="stack">
-        {degraded && <DegradedBanner phase={degraded.phase} />}
+        {degraded && <DegradedBanner phase={degraded.phase} reason={degraded.reason} />}
         <div className="card"><Skeleton lines={6} /></div>
       </div>
     );
@@ -55,7 +55,7 @@ export function LiveDetail({ status }: { status: BatchStatus }) {
         {view.genTxBatchId ? ` · Core batch ${view.genTxBatchId}` : ""}
         {phase === "DRAFTED" && view.authorizeBy && <> · <strong>Expires in {remaining(view.authorizeBy, now)}</strong> <Annotation href={DOCS.timer}>Durable timer</Annotation></>}
       </div>
-      {degraded && <DegradedBanner phase={degraded.phase} />}
+      {degraded && <DegradedBanner phase={degraded.phase} reason={degraded.reason} />}
       {view.closure && <div className="banner warning">{view.closure.phase === "CANCELLED" ? "Cancelled" : "Denied"} by {view.closure.by}{view.closure.reason ? `: ${view.closure.reason}` : ""}</div>}
 
       <div className="tabs" role="tablist">
@@ -70,11 +70,14 @@ export function LiveDetail({ status }: { status: BatchStatus }) {
   );
 }
 
-function DegradedBanner({ phase }: { phase: string }) {
+// WHY two wordings: with no workers the batch resumes on its own once one returns; a failing Workflow Task (a
+// broken release) also blocks the Query, but needs a fixed build first, so "continue automatically" would be untrue.
+function DegradedBanner({ phase, reason }: { phase: string; reason: "NO_WORKERS" | "QUERY_FAILED" }) {
+  const noWorkers = reason === "NO_WORKERS";
   return (
     <div className="banner info" role="status">
-      <div>Live progress is temporarily unavailable. Your batch is safe and will continue automatically.{phase ? ` Current status: ${phase}.` : ""}</div>
-      <Annotation href={DOCS.workers}>Degraded: no workers polling</Annotation>
+      <div>Live progress is temporarily unavailable. Your batch is safe{noWorkers ? " and will continue automatically" : " and nothing has been lost"}.{phase ? ` Current status: ${phase}.` : ""}</div>
+      <Annotation href={DOCS.workers}>{noWorkers ? "Degraded: no workers polling" : "Degraded: the `status` Query failed (see the Temporal UI)"}</Annotation>
     </div>
   );
 }

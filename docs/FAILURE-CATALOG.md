@@ -13,7 +13,7 @@ before each scenario. Users and passwords: see RUNBOOK-DEMO.md.
 
 - **Trigger:** Core faults → Outage 45 s
 - **Click path:** Control Center → Failure catalog → F01 → **Outage 45 s (Lakeshore)** while a Lakeshore batch is drafting (Scenario A: set latency 1500 ms first so the draft lasts).
-- **You'll see:** Tiles show “Retrying · attempt N · next in Xs” (Describe); Core failures climb; no tile turns red; the batch completes whole.
+- **You'll see:** Retrying tiles turn amber and show “retry #N · in Xs” (Describe); Core failures climb; no tile turns red; the batch completes whole.
 - **Handled by:** Retry Policy without an attempt cap; backoff capped by MaximumInterval (https://docs.temporal.io/encyclopedia/retry-policies)
 - **Say this:** “Nothing failed: Temporal kept retrying each chunk in place until Core came back, and no wire was lost or duplicated.”
 
@@ -149,7 +149,7 @@ before each scenario. Users and passwords: see RUNBOOK-DEMO.md.
 
 ### F17 — Staged data expired
 
-- **Trigger:** Claim check → Expire staged data for a staged batch → Draft
+- **Trigger:** Paste a staged batch ID → Expire staged rows → Draft
 - **Click path:** Lakeshore portal: upload a file (do not draft) → copy the batch ID from the URL → Control Center F17: paste it in **Batch ID**, click **Expire staged rows** → portal: Save as draft → chunks park → Morgan → exceptions → **Cancel batch**.
 - **You'll see:** Chunks park CLAIM_CHECK_NOT_FOUND; ops cancels; the user re-uploads.
 - **Handled by:** Non-retryable error → park → human decision (https://docs.temporal.io/design-patterns/resumable-activity)
@@ -227,9 +227,9 @@ before each scenario. Users and passwords: see RUNBOOK-DEMO.md.
 
 ### F26 — Retry budget exhausted
 
-- **Trigger:** Draft defaults → retry budget 60 s; outage 120 s; Draft
-- **Click path:** F26 → **Lakeshore retry budget 60 s** → **Outage 120 s** → Save as draft → chunks park RETRY_BUDGET_EXHAUSTED (after ~60 s) → after the outage, Morgan **Retry**. Reset draft defaults afterwards.
-- **You'll see:** Chunks park RETRY_BUDGET_EXHAUSTED with the last error; ops Retry after the outage → completes.
+- **Trigger:** Draft defaults → retry budget 60 s; Draft; then outage 120 s
+- **Click path:** F26 → **Lakeshore retry budget 60 s** → Save as draft (Lakeshore latency 1500 ms helps) → **Outage 120 s** → the in-flight chunks park RETRY_BUDGET_EXHAUSTED (after ~60 s) → after the outage, Morgan **Retry chunk**. Reset draft defaults afterwards.
+- **You'll see:** In-flight chunks park RETRY_BUDGET_EXHAUSTED with the last error after about a minute; ops Retry after the outage → completes. (Outage before Draft parks the batch's first Core step instead: Retry step.)
 - **Handled by:** Fixed Wall-Time Retries + park (https://docs.temporal.io/design-patterns/fixed-wall-time-retries)
 - **Say this:** “The budget is wall time, not attempts; when it runs out the chunk parks instead of failing.”
 
@@ -315,7 +315,7 @@ before each scenario. Users and passwords: see RUNBOOK-DEMO.md.
 
 - **Trigger:** Load → Payroll day; then enable the per-FI rate limit
 - **Click path:** Core load & fairness → **Launch payroll day** → watch Lakeshore calls/s rise → **Enable limit** (3/s) → Lakeshore flattens at 3/s; Prairie unaffected → **Remove limit**.
-- **You'll see:** Without the limit, Lakeshore Core calls/s and in-flight rise with each batch. With it, Lakeshore is capped at the set rate regardless of batch count; both Lakeshore batches keep progressing; Prairie is unaffected.
+- **You'll see:** Without the limit, Lakeshore Core calls/s and in-flight rise with each batch. With it, Lakeshore is capped at the set rate regardless of batch count; both Lakeshore batches keep progressing; Prairie runs on its own allowance, not queued behind Lakeshore. The batches finish in seconds without the limit, so launch once without it and once with it.
 - **Handled by:** Fairness key = FI + per-key rate limit, enforced by the Temporal Service (https://docs.temporal.io/develop/task-queue-priority-fairness)
 - **Say this:** “The cap is per bank and enforced by Temporal, across every batch and every worker.”
 

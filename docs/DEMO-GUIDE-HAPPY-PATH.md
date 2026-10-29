@@ -2,7 +2,8 @@
 
 This guide walks through running the demo from scratch, one click at a time. It covers **only the happy path**:
 a customer uploads a payroll file, it is drafted into the bank's system, two approvers sign, and the wires are
-released. No failures, no chaos. Later guides build on this one.
+released. No failures, no chaos. [Part 2](DEMO-GUIDE-FAILURES.md) builds on this one: a Core outage, then an
+account hold that a bank operator has to fix.
 
 The whole happy path takes about **5 minutes** in front of an audience. The system does its part in under
 30 seconds; the rest is you talking.
@@ -183,7 +184,8 @@ amount limits, and dual control. One approval is not enough for $13 million."
 5. About **10 seconds** later, the pill says **Authorized**:
    - **Authorized 4,997 / 5,000.** (The 3 screened wires were never drafted, so they are never released.)
    - **Approvals:** "Approved APR-… — Alex Rivera, Controller signed …; Sam Patel, Treasurer signed …"
-   - **Timeline:** … authorization received (approved by Alex and Sam) → authorizing → authorized.
+   - **Timeline:** … authorization received APR-… · approved by Alex Rivera, Controller and Sam Patel, Treasurer
+     → authorizing → authorized.
 
 **Say:** "When the second approval landed, the bank told the workflow, and the same workflow that drafted the
 wires released them. One business process, one workflow, one ID from upload to release."
