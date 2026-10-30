@@ -50,6 +50,10 @@ type Input struct {
 	Today      time.Time // the FI's local date at upload (auth.LocalToday); process dates before it are past
 	MaxRows    int
 	PageSize   int
+	// The FI's current chunk size and MAX_CHUNKS_PER_BATCH. Staging is where the chunk count is first known, so a
+	// batch that could never run is marked INVALID here, before anyone can draft or approve it. 0 skips the check.
+	ChunkSize int
+	MaxChunks int
 }
 
 // FileError reports file-level problems (code FILE): the file is not staged at all.
@@ -88,6 +92,15 @@ func Stage(ctx context.Context, store claimcheck.Store, accounts AccountChecker,
 		Status:   model.StagingValid,
 		RowCount: parsed.rowCount, ValidRowCount: len(valid), ErrorCount: len(parsed.errors),
 		TotalAmountCents: total, PageSize: in.PageSize, Groups: groups,
+	}
+	if in.ChunkSize > 0 && in.MaxChunks > 0 {
+		if n := ChunkCount(groups, in.ChunkSize); n > in.MaxChunks {
+			// A batch-level error (row 0). PRODUCTION NOTE: a batch this shape needs Continue-As-New or child
+			// workflows that each own a segment of the batch; this reference implementation does not do that.
+			m.BatchError = ChunkLimitMessage(n, in.ChunkSize, in.MaxChunks)
+			parsed.errors = append([]model.ValidationError{{Code: CodeTooManyChunks, Message: m.BatchError}}, parsed.errors...)
+			m.ErrorCount = len(parsed.errors)
+		}
 	}
 	if len(parsed.errors) > 0 {
 		m.Status = model.StagingInvalid

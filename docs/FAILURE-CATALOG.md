@@ -2,7 +2,8 @@
 
 Generated from `control-ui/src/catalog.ts` (the Control Center's Failure catalog section). Every entry is
 triggered from the **Control Center** (http://localhost:3100) or the **portals** (Lakeshore http://localhost:3001,
-Prairie http://localhost:3002) unless marked *Narrated*. Defaults: latency 600 ms, chunk size 250, concurrency 2,
+Prairie http://localhost:3002) unless marked *Narrated*. Each FI's Core queue runs at 10 Activities/s
+(config/routing.yaml) unless overridden. Defaults: latency 600 ms, chunk size 250, concurrency 4,
 retry max interval 20 s, retry budget 30 min, approval window 24 h. Run **Reset** (Control Center → Reset)
 before each scenario. Users and passwords: see RUNBOOK-DEMO.md.
 
@@ -70,7 +71,7 @@ before each scenario. Users and passwords: see RUNBOOK-DEMO.md.
 - **Trigger:** Outage on Lakeshore while a Prairie batch drafts
 - **Click path:** F08 → **Outage 120 s (Lakeshore)** → Prairie portal (Riley) → upload harvest-2000 → Save as draft → DRAFTED while Lakeshore is down.
 - **You'll see:** The Prairie batch is unaffected; Lakeshore retries.
-- **Handled by:** One Core per FI; tenant context in workflow input (https://docs.temporal.io/develop/task-queue-priority-fairness)
+- **Handled by:** One Core per FI, each with its own Core task queue; tenant context in workflow input (https://docs.temporal.io/develop/task-queue-priority-fairness)
 - **Say this:** “Each FI has its own Core and the FI travels in the workflow input, so one bank's outage never touches another's.”
 
 
@@ -127,6 +128,24 @@ before each scenario. Users and passwords: see RUNBOOK-DEMO.md.
 - **You'll see:** No visible interruption.
 - **Handled by:** Graceful shutdown; two workers (https://docs.temporal.io/workflows)
 - **Say this:** “Deploying workers is a non-event.”
+
+### F46 — Core-queue workers for one FI stopped
+
+- **Trigger:** Narrated *(Narrated)*
+- **Click path:** Narrated. In this demo both worker processes poll every queue, so one FI's Core-queue workers cannot be stopped alone; run `make test-integration` instead.
+- **You'll see:** That FI's Core Activities wait in its queue (scheduled, no attempt started); the other FI keeps running. If the workers stay away longer than the retry budget (30 min), ScheduleToClose parks the step and RETRY resumes it.
+- **Handled by:** A Core task queue per FI; the retry budget (ScheduleToClose) bounds the wait (https://docs.temporal.io/design-patterns/fixed-wall-time-retries)
+- **Say this:** “With no workers for one bank's Core, that bank's work simply waits in its queue; the other bank never notices.”
+- **Evidence:** `make test-integration` (`go/internal/workflow/queues_integration_test.go`) starts a real dev server with no poller on `bulkwire-core-lakeshore`: the Prairie batch completes AUTHORIZED, the Lakeshore batch stays RUNNING with `EnsureGenTxBatch` SCHEDULED on its queue, and it completes once a Lakeshore Core worker starts. Per-FI Core worker containers are the production shape (see docs/ARCHITECTURE.md, Task queues and Core load).
+
+### F47 — Core Activity on the wrong FI's queue
+
+- **Trigger:** Narrated *(Narrated)*
+- **Click path:** Narrated: `make test-go`.
+- **You'll see:** The chunk parks with WRONG_FI_ROUTING naming the FI and the queue (no account numbers); nothing reaches another FI's Core.
+- **Handled by:** Non-retryable error type parks the chunk (Resumable Activity) (https://docs.temporal.io/design-patterns/resumable-activity)
+- **Say this:** “A worker only holds credentials for its own bank's Core, so a routing mistake parks the chunk instead of touching the wrong bank.”
+- **Evidence:** `TestCoreActivityOnTheWrongFIsQueueParks` (`go/internal/activities`): a worker for `bulkwire-core-prairie` refuses every Lakeshore Core Activity with the non-retryable `WrongFiRouting` error, before any call to Core. Workflow test W20: the chunk parks (WRONG_FI_ROUTING, source ROUTING) and RETRY after the fix completes it. In a deployment this needs bulkwire-service and the workers to disagree about `config/routing.yaml`; startup validation rejects a file that maps an FI to zero or two queues.
 
 
 ## Temporal & claim check
@@ -249,6 +268,14 @@ before each scenario. Users and passwords: see RUNBOOK-DEMO.md.
 - **Handled by:** cancel Update + validator (https://docs.temporal.io/encyclopedia/workflow-message-passing)
 - **Say this:** “Cancel is an Update the workflow validates; in-flight work finishes cleanly.”
 
+### F49 — Batch exceeds maxChunksPerBatch
+
+- **Trigger:** Lakeshore chunk size 1; upload summit-payroll-5000
+- **Click path:** F49 → **Lakeshore chunk size 1** → Jordan uploads **summit-payroll-5000** → review screen → **Restore 250**.
+- **You'll see:** The review screen says the file needs 5,000 chunks at chunk size 1 and one batch can have at most 1,300; Save as draft and Approve are unavailable. A batch staged at 250 and drafted after the change gets the same message as a 409 at Draft (BATCH_TOO_MANY_CHUNKS); if the change comes between an approval and Core's callback, Core shows the notification as failed and bulkwire-service logs it at ERROR.
+- **Handled by:** History guard (MAX_CHUNKS_PER_BATCH) before any workflow starts (https://docs.temporal.io/workflow-execution/limits)
+- **Say this:** “Chunk size has no floor, so the limit is on chunk count: a batch that would outgrow one workflow history is refused before it starts.”
+
 
 ## Approvals
 
@@ -306,18 +333,18 @@ before each scenario. Users and passwords: see RUNBOOK-DEMO.md.
 ### F35 — Retry storm
 
 - **Trigger:** Load → Retry storm (20 concurrent drafts, distinct keys)
-- **Click path:** F35 → **Fire 20 drafts** (or Core load & fairness → Retry storm): 20 responses, 1 execution.
+- **Click path:** F35 → **Fire 20 drafts** (or Core load & queues → Retry storm): 20 responses, 1 execution.
 - **You'll see:** 20 responses, 1 execution.
 - **Handled by:** Business Workflow ID (https://docs.temporal.io/workflow-execution/workflowid-runid)
 - **Say this:** “Twenty requests with twenty different keys still produce exactly one workflow.”
 
 ### F36 — Payroll day, two users at one FI
 
-- **Trigger:** Load → Payroll day; then enable the per-FI rate limit
-- **Click path:** Core load & fairness → **Launch payroll day** → watch Lakeshore calls/s rise → **Enable limit** (3/s) → Lakeshore flattens at 3/s; Prairie unaffected → **Remove limit**.
-- **You'll see:** Without the limit, Lakeshore Core calls/s and in-flight rise with each batch. With it, Lakeshore is capped at the set rate regardless of batch count; both Lakeshore batches keep progressing; Prairie runs on its own allowance, not queued behind Lakeshore. The batches finish in seconds without the limit, so launch once without it and once with it.
-- **Handled by:** Fairness key = FI + per-key rate limit, enforced by the Temporal Service (https://docs.temporal.io/develop/task-queue-priority-fairness)
-- **Say this:** “The cap is per bank and enforced by Temporal, across every batch and every worker.”
+- **Trigger:** Load → Payroll day; then rate-limit Lakeshore's Core queue
+- **Click path:** Core load & queues → **Launch payroll day** → watch Lakeshore calls/s rise → Core lakeshore card: rps **3** → **Set override** → Lakeshore flattens at about 3/s; Prairie unaffected → **Clear override**.
+- **You'll see:** Without an override each Core queue runs at its routing.yaml rate (10/s): Lakeshore calls/s rise as both Lakeshore batches run. With Lakeshore's queue at 3/s, Lakeshore calls flatten at about 3/s and both Lakeshore batches keep progressing; Prairie's queue is separate, so Prairie is unaffected. The batches finish in seconds at 10/s, so launch once without the override and once with it.
+- **Handled by:** A Core task queue per FI, each with its own rate limit enforced by the Temporal Service (https://docs.temporal.io/develop/task-queue-priority-fairness)
+- **Say this:** “Each bank's Core has its own queue and its own cap, enforced by Temporal across every batch and every worker.”
 
 ### F37 — Concurrency is a setting
 
@@ -326,6 +353,22 @@ before each scenario. Users and passwords: see RUNBOOK-DEMO.md.
 - **You'll see:** Core max in-flight 1 vs 4 (latency is fixed; real gains must be measured).
 - **Handled by:** Semaphore (https://pkg.go.dev/go.temporal.io/sdk/workflow#NewSemaphore)
 - **Say this:** “Parallelism is one number in the workflow input, not an architecture.”
+
+### F45 — One FI's Core queue rate limited
+
+- **Trigger:** Lakeshore queue 2/s; draft one batch at each FI
+- **Click path:** F45 → **Lakeshore queue 2/s** (or `make ratelimit FI=lakeshore RPS=2`) → draft summit-payroll-5000 at Lakeshore and harvest-2000 at Prairie → **Clear override** (or `RPS=default`).
+- **You'll see:** Core load & queues: Lakeshore's queue shows override 2/s (routing.yaml 10/s) and Lakeshore calls/s stay at about 2; its batch is slower. Prairie's queue is still at 10/s and its batch runs at normal speed. Clearing the override returns Lakeshore to 10/s without a deployment.
+- **Handled by:** Task queue rate limit (UpdateTaskQueueConfig; also `make ratelimit FI=lakeshore RPS=2`) (https://docs.temporal.io/develop/task-queue-priority-fairness)
+- **Say this:** “Throttling one bank's Core is a server-side setting on that bank's queue; nobody else slows down.”
+
+### F48 — Large and small batch at one FI (Fairness)
+
+- **Trigger:** Lakeshore queue 2/s; Load → Fairness comparison
+- **Click path:** Core load & queues → **Lakeshore queue 2/s** → **Launch comparison** (three summit-payroll-5000, then northline-bonus-500 3 s later) → watch the Northline batch in Taylor's portal → **Clear override**.
+- **You'll see:** With Lakeshore's queue at 2/s, the three 5,000-wire batches keep about 12 Core Activities waiting (4 each, the per-batch semaphore). The 500-wire Northline batch, started 3 s later, reaches Awaiting approval in about 9 s (measured: 9.0 s and 9.2 s); the large batches take about 47 s. For comparison, with every Lakeshore batch on one fairness key (so first come, first served among them) the small batch took 22.5 s in both runs and the large ones were unchanged. Fairness changes only how long the small batch waits behind tasks already queued; it does not make the queue faster, and with no backlog it changes nothing.
+- **Handled by:** Fairness keyed by batch ID on the FI's Core queue; the per-batch semaphore (https://docs.temporal.io/develop/task-queue-priority-fairness)
+- **Say this:** “When one bank's queue is backed up, Temporal takes turns across that bank's batches, so a small batch is not stuck behind the big ones.”
 
 
 ## Deployments, security, observability

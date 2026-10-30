@@ -92,14 +92,16 @@ func (p *portal) draft(ctx context.Context, batchID, key string) (int, error) {
 	return status, err
 }
 
-// payrollDay: for each entry concurrently, sign in as that user, stage the sample, and draft it.
+// payrollDay: for each entry concurrently, sign in as that user, stage the sample, and draft it (an entry with
+// startAfterMs waits that long first: the Fairness comparison starts the large batches before the small one).
 func (s *Service) payrollDay(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Batches []struct {
-			FiID        string `json:"fiId"`
-			UserID      string `json:"userId"`
-			Sample      string `json:"sample"`
-			Concurrency int    `json:"concurrency"`
+			FiID         string `json:"fiId"`
+			UserID       string `json:"userId"`
+			Sample       string `json:"sample"`
+			Concurrency  int    `json:"concurrency"`
+			StartAfterMs int    `json:"startAfterMs"` // stage and draft this batch after the others have started
 		} `json:"batches"`
 	}
 	if err := decode(r, &body); err != nil || len(body.Batches) == 0 {
@@ -147,6 +149,7 @@ func (s *Service) payrollDay(w http.ResponseWriter, r *http.Request) {
 			defer func() { results[i] = res }()
 			ctx, cancel := timeout(r.Context(), 90*time.Second)
 			defer cancel()
+			time.Sleep(time.Duration(b.StartAfterMs) * time.Millisecond)
 			p, err := s.portalAs(b.FiID, b.UserID)
 			if err == nil {
 				res.BatchID, err = p.stage(ctx, b.Sample)

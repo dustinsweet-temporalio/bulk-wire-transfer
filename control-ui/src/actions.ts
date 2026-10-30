@@ -69,8 +69,10 @@ export async function runAction(a: Action, ctx: { batchId?: string; fiId?: strin
       return post("/load/retry-storm", { fiId: ctx.fiId ?? "lakeshore", userId: ctx.userId ?? "jordan", batchId: ctx.batchId ?? "", requests: 20 });
     case "payrollDay":
       return post("/load/payroll-day", { batches: PAYROLL_DAY });
-    case "fairness":
-      return put("/fairness", { enabled: a.rpsPerFi > 0, rpsPerFi: a.rpsPerFi });
+    case "ratelimit":
+      return put(`/ratelimits/${a.fi}`, { rps: a.rps });
+    case "fairnessTest":
+      return post("/load/payroll-day", { batches: FAIRNESS_TEST });
     case "rotate":
       return post("/encryption/rotate");
     case "goto":
@@ -86,4 +88,13 @@ export const PAYROLL_DAY = [
   { fiId: "lakeshore", userId: "jordan", sample: "summit-payroll-10000", concurrency: 4 },
   { fiId: "lakeshore", userId: "taylor", sample: "northline-payroll-10000", concurrency: 4 },
   { fiId: "prairie", userId: "riley", sample: "harvest-6000", concurrency: 4 },
+];
+
+// The Fairness comparison (F48): three 5,000-wire Summit batches at Lakeshore, then a 500-wire Northline batch 3 s
+// later, so the small batch arrives while the large ones already have Core Activities waiting in the queue.
+export const FAIRNESS_TEST = [
+  { fiId: "lakeshore", userId: "jordan", sample: "summit-payroll-5000", concurrency: 4 },
+  { fiId: "lakeshore", userId: "jordan", sample: "summit-payroll-5000", concurrency: 4 },
+  { fiId: "lakeshore", userId: "jordan", sample: "summit-payroll-5000", concurrency: 4 },
+  { fiId: "lakeshore", userId: "taylor", sample: "northline-bonus-500", concurrency: 4, startAfterMs: 3000 },
 ];

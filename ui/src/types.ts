@@ -45,6 +45,7 @@ export interface StagingSummary {
   groups: StagingGroup[];
   uploadedBy: string;
   uploadedAt: string;
+  batchError?: string; // a batch-level reason it cannot be drafted (e.g. too many chunks)
 }
 
 export interface StagedRow {

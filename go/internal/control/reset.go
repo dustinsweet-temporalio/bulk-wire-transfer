@@ -55,16 +55,14 @@ func (s *Service) resetSteps() []resetStep {
 			}
 			return "transactions cleared, accounts active, faults none, latency default, stats zeroed", nil
 		}},
-		{"remove fairness rate limit", func(_ context.Context, r *http.Request) (string, error) {
-			return "per-FI limit removed", s.setFairness(r, false, 0)
-		}},
+		{"clear Core queue rate-limit overrides", s.clearRateLimits},
 		{"reset draft defaults", func(_ context.Context, r *http.Request) (string, error) {
 			for _, fi := range s.Cfg.Core.FiIDs() { // one call per FI: each carries that FI's token
-				if err := s.bulkwire(r, fi, http.MethodPut, "/internal/draft-defaults", map[string]any{fi: s.envDefaults()}, nil); err != nil {
+				if err := s.bulkwire(r, fi, http.MethodPut, "/internal/draft-defaults", map[string]any{fi: s.envDefaults(fi)}, nil); err != nil {
 					return "", err
 				}
 			}
-			return "defaults from .env", nil
+			return "defaults from .env and routing.yaml", nil
 		}},
 	}
 }

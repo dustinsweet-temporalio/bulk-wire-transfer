@@ -74,7 +74,8 @@ type Manifest struct {
 	ErrorCount       int         `json:"errorCount"`
 	TotalAmountCents int64       `json:"totalAmountCents"` // valid rows only
 	PageSize         int         `json:"pageSize"`
-	Groups           []GroupInfo `json:"groups"` // canonical order
+	Groups           []GroupInfo `json:"groups"`               // canonical order
+	BatchError       string      `json:"batchError,omitempty"` // a batch-level problem (e.g. too many chunks); makes it INVALID
 }
 
 // InvalidRowCount is the number of rows that failed validation.

@@ -31,7 +31,24 @@ func Plan(m model.Manifest, chunkSize int) ([]model.ChunkRef, error) {
 	return chunks, nil
 }
 
-// ChunkID is "g{groupIndex:02d}-c{chunkIndex:02d}", e.g. "g03-c01".
+// ChunkCount is how many chunks Plan would produce, without building them.
+func ChunkCount(groups []model.GroupInfo, chunkSize int) int {
+	n := 0
+	for _, g := range groups {
+		n += (g.RowCount + chunkSize - 1) / chunkSize
+	}
+	return n
+}
+
+// ChunkLimitMessage is what the user sees when a batch would need more chunks than one workflow should run
+// (MAX_CHUNKS_PER_BATCH): on the review screen at staging, or on Draft if the chunk size changed since.
+func ChunkLimitMessage(chunks, chunkSize, maxChunks int) string {
+	return fmt.Sprintf("This file needs %d chunks at the bank's current chunk size of %d; one batch can have at most %d. "+
+		"Split the file into smaller files and upload each one.", chunks, chunkSize, maxChunks)
+}
+
+// ChunkID is "g{groupIndex:02d}-c{chunkIndex:02d}", e.g. "g03-c01". With very small chunks the chunk index
+// simply grows past two digits ("g00-c1234"); IDs stay unique.
 func ChunkID(groupIndex, chunkIndex int) string {
 	return fmt.Sprintf("g%02d-c%02d", groupIndex, chunkIndex)
 }

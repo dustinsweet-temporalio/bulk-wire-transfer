@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"bulkwire/internal/auth"
 	"bulkwire/internal/claimcheck"
 	"bulkwire/internal/config"
+	"bulkwire/internal/routing"
 	"bulkwire/internal/samples"
 	"bulkwire/internal/staging"
 	"bulkwire/internal/workflow"
@@ -44,13 +46,15 @@ type fakeTemporal struct {
 	describe   *workflowservice.DescribeWorkflowExecutionResponse
 	pollers    int
 	lastStart  client.StartWorkflowOptions
+	lastInput  workflow.BatchInput
 	lastUpdate client.UpdateWorkflowOptions
 	starts     int
 	listQuery  string
 }
 
-func (f *fakeTemporal) NewWithStartWorkflowOperation(o client.StartWorkflowOptions, _ any, _ ...any) client.WithStartWorkflowOperation {
+func (f *fakeTemporal) NewWithStartWorkflowOperation(o client.StartWorkflowOptions, _ any, args ...any) client.WithStartWorkflowOperation {
 	f.lastStart = o
+	f.lastInput = args[0].(workflow.BatchInput)
 	return nil
 }
 func (f *fakeTemporal) UpdateWithStartWorkflow(_ context.Context, o client.UpdateWithStartWorkflowOptions) (client.WorkflowUpdateHandle, error) {
@@ -139,12 +143,16 @@ func newTestServer(t *testing.T, f *fakeTemporal) (*Server, http.Handler) {
 	cfg := config.Config{
 		Temporal:       config.Temporal{Namespace: "bulkwire", TaskQueue: "bulkwire", UIURL: "http://localhost:8233"},
 		ClaimCheck:     config.ClaimCheck{PageSize: 500},
-		Defaults:       config.Defaults{ChunkSize: 250, Concurrency: 2, MaxRows: 10000, ApprovalWindow: 24 * time.Hour, RetryBudget: 30 * time.Minute, RetryMaxInterval: 20 * time.Second},
+		Defaults:       config.Defaults{ChunkSize: 250, Concurrency: 4, MaxRows: 10000, MaxChunks: config.MaxChunksPerBatchDefault, ApprovalWindow: 24 * time.Hour, RetryBudget: 30 * time.Minute, RetryMaxInterval: 20 * time.Second},
 		Core:           config.Core{Endpoints: map[string]string{"lakeshore": "x", "prairie": "y"}, InternalTokens: map[string]string{"lakeshore": "itok-l", "prairie": "itok-p"}},
 		AuthSigningKey: testKey, DemoPassword: "demo",
 	}
+	routes, err := routing.Load("../../../config/routing.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
 	s := &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Temporal: f, Store: claimcheck.NewMemory(), Core: activeCore{},
-		Tokens: auth.NewTokens(testKey), Cfg: cfg, Defaults: NewDraftDefaults(cfg), Now: time.Now}
+		Tokens: auth.NewTokens(testKey), Cfg: cfg, Routing: routes, Defaults: NewDraftDefaults(cfg, routes), Now: time.Now}
 	return s, s.Routes()
 }
 
@@ -159,6 +167,12 @@ func token(t *testing.T, fi, company, user string) string {
 
 // stage uploads a generated sample as `user` and returns the batch ID.
 func stage(t *testing.T, h http.Handler, tok, sample string) string {
+	t.Helper()
+	return stageSummary(t, h, tok, sample).BatchID
+}
+
+// stageSummary uploads a generated sample and returns the review-screen summary.
+func stageSummary(t *testing.T, h http.Handler, tok, sample string) StagingSummary {
 	t.Helper()
 	data, _ := samples.Generate(sample, time.Now())
 	var body bytes.Buffer
@@ -176,7 +190,7 @@ func stage(t *testing.T, h http.Handler, tok, sample string) string {
 	}
 	var sum StagingSummary
 	_ = json.Unmarshal(rec.Body.Bytes(), &sum)
-	return sum.BatchID
+	return sum
 }
 
 func do(h http.Handler, method, path, tok string, headers map[string]string) *httptest.ResponseRecorder {
@@ -210,8 +224,11 @@ func TestDraftUsesUpdateWithStartWithTheSpecifiedOptions(t *testing.T) {
 	}
 	o := f.lastStart
 	if o.ID != "bulkwire/lakeshore/"+batch || o.WorkflowIDConflictPolicy != enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING ||
-		o.WorkflowIDReusePolicy != enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE || o.Priority.FairnessKey != "lakeshore" {
-		t.Fatalf("start options: %+v", o)
+		o.WorkflowIDReusePolicy != enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE || o.Priority.FairnessKey != "" {
+		t.Fatalf("start options (no fairness key at start: Core Activities set their own): %+v", o)
+	}
+	if in := f.lastInput; in.CoreTaskQueue != "bulkwire-core-lakeshore" || in.CoreFairnessKey != batch || in.Concurrency != 4 {
+		t.Fatalf("the input must carry the FI's Core queue, the batch ID as fairness key, and concurrency 4: %+v", in)
 	}
 	if f.lastUpdate.UpdateID != "K1" || f.lastUpdate.UpdateName != workflow.UpdateDraft || f.lastUpdate.WaitForStage != client.WorkflowUpdateStageCompleted {
 		t.Fatalf("update options: %+v", f.lastUpdate)
@@ -359,8 +376,13 @@ func TestDraftDefaultsValidation(t *testing.T) {
 	if d, _ := s.Defaults.get("lakeshore"); d.concurrency != 4 || d.approvalWindow != 2*time.Minute {
 		t.Fatalf("not applied: %+v", d)
 	}
-	if c := put(`{"lakeshore":{"chunkSize":10,"concurrency":4,"approvalWindow":"2m","retryBudget":"60s","retryMaxInterval":"5s"}}`); c != 400 {
-		t.Fatalf("invalid chunk size accepted: %d", c)
+	if c := put(`{"lakeshore":{"chunkSize":1,"concurrency":4,"approvalWindow":"2m","retryBudget":"60s","retryMaxInterval":"5s"}}`); c != 200 {
+		t.Fatalf("chunk size 1 has no artificial floor: %d", c)
+	}
+	for _, size := range []string{"0", "10001"} {
+		if c := put(`{"lakeshore":{"chunkSize":` + size + `,"concurrency":4,"approvalWindow":"2m","retryBudget":"60s","retryMaxInterval":"5s"}}`); c != 400 {
+			t.Fatalf("chunk size %s accepted: %d", size, c)
+		}
 	}
 	if c := put(`{"prairie":{"chunkSize":250,"concurrency":4,"approvalWindow":"2m","retryBudget":"60s","retryMaxInterval":"5s"}}`); c != 403 {
 		t.Fatalf("lakeshore's token changed prairie's defaults: %d", c)
@@ -443,5 +465,114 @@ func TestApprovalsQueueListsOnlyRunningBatches(t *testing.T) {
 	want := "WorkflowType = 'BulkWireBatch' AND FiId = 'lakeshore' AND CustomerId = 'summit-logistics' AND BulkWireStatus = 'DRAFTED' AND ExecutionStatus = 'Running'"
 	if f.listQuery != want {
 		t.Fatalf("query:\n got %s\nwant %s", f.listQuery, want)
+	}
+}
+
+func setChunkSize(t *testing.T, s *Server, fi string, size int) {
+	t.Helper()
+	s.Defaults.mu.Lock()
+	d := s.Defaults.byFI[fi]
+	d.ChunkSize = size
+	s.Defaults.byFI[fi] = d
+	s.Defaults.mu.Unlock()
+}
+
+func approvalCallback(s *Server, h http.Handler, batch string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/internal/approvals",
+		bytes.NewBufferString(fmt.Sprintf(`{"fiId":"lakeshore","batchId":%q,"approvalRef":"APR-1"}`, batch)))
+	req.Header.Set("X-Internal-Token", s.Cfg.Core.TokenFor("lakeshore"))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// The history guard at staging: 10,000 rows at chunk size 10 plan about 1,000 chunks, within the default
+// MAX_CHUNKS_PER_BATCH (1,300), so the batch is VALID and drafts. At chunk size 1 they need 10,000 chunks: staging
+// marks the batch INVALID with the reason on the review screen, and no workflow can start.
+func TestChunkLimitIsCheckedAtStaging(t *testing.T) {
+	f := &fakeTemporal{view: workflow.BatchView{Phase: workflow.PhaseDrafting}}
+	s, h := newTestServer(t, f)
+	jordan := token(t, "lakeshore", "SUMMIT", "jordan")
+
+	setChunkSize(t, s, "lakeshore", 10)
+	ok := stage(t, h, jordan, "summit-payroll-10000")
+	if rec := do(h, http.MethodPost, "/api/batches/"+ok+"/draft", jordan, map[string]string{"Idempotency-Key": "K1"}); rec.Code != http.StatusAccepted {
+		t.Fatalf("10,000 rows at chunk size 10 must draft: %d %s", rec.Code, rec.Body)
+	}
+	if f.lastInput.ChunkSize != 10 {
+		t.Fatalf("chunk size in input: %d", f.lastInput.ChunkSize)
+	}
+
+	setChunkSize(t, s, "lakeshore", 1)
+	sum := stageSummary(t, h, jordan, "summit-payroll-10000")
+	tooMany := sum.BatchID
+	if sum.Status != "INVALID" || !strings.Contains(sum.BatchError, "needs 10000 chunks") || !strings.Contains(sum.BatchError, "at most 1300") {
+		t.Fatalf("staging must reject with a user-facing reason: %+v", sum)
+	}
+	starts := f.starts
+	if got := code(t, do(h, http.MethodPost, "/api/batches/"+tooMany+"/draft", jordan, map[string]string{"Idempotency-Key": "K2"})); got != "409 BATCH_INVALID" {
+		t.Fatalf("draft of a too-many-chunks batch: %s", got)
+	}
+	if f.starts != starts {
+		t.Fatal("no workflow may start")
+	}
+}
+
+// The backstop before Update-with-Start: a batch staged at chunk size 250 (VALID) but drafted after the FI's chunk
+// size dropped to 1 is rejected at Draft with a user-facing message, unless its workflow already exists (an existing
+// execution keeps the input it started with).
+func TestChunkLimitBackstopOnDraft(t *testing.T) {
+	f := &fakeTemporal{view: workflow.BatchView{Phase: workflow.PhaseDrafting}}
+	s, h := newTestServer(t, f)
+	jordan := token(t, "lakeshore", "SUMMIT", "jordan")
+	batch := stage(t, h, jordan, "summit-payroll-10000")
+	setChunkSize(t, s, "lakeshore", 1)
+
+	rec := do(h, http.MethodPost, "/api/batches/"+batch+"/draft", jordan, map[string]string{"Idempotency-Key": "K1"})
+	if got := code(t, rec); got != "409 BATCH_TOO_MANY_CHUNKS" || !strings.Contains(rec.Body.String(), "Split the file") {
+		t.Fatalf("got %s %s", got, rec.Body)
+	}
+	if f.starts != 0 {
+		t.Fatal("no workflow may start")
+	}
+
+	f.describe = &workflowservice.DescribeWorkflowExecutionResponse{} // the workflow already exists
+	if rec := do(h, http.MethodPost, "/api/batches/"+batch+"/draft", jordan, map[string]string{"Idempotency-Key": "K1"}); rec.Code != http.StatusAccepted {
+		t.Fatalf("an existing execution must still receive its Updates: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// The backstop on Core's approval callback: Core has already recorded the approval, so the callback must not be
+// dropped silently. Core gets an error (409) and the failure is logged at ERROR with the batch ID.
+func TestChunkLimitBackstopOnApprovalCallbackIsAnError(t *testing.T) {
+	f := &fakeTemporal{view: workflow.BatchView{Phase: workflow.PhaseDrafting}}
+	s, h := newTestServer(t, f)
+	var logs bytes.Buffer
+	s.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	batch := stage(t, h, token(t, "lakeshore", "SUMMIT", "jordan"), "summit-payroll-10000")
+	setChunkSize(t, s, "lakeshore", 1)
+
+	rec := approvalCallback(s, h, batch)
+	if got := code(t, rec); got != "409 BATCH_TOO_MANY_CHUNKS" {
+		t.Fatalf("got %s %s", got, rec.Body)
+	}
+	if f.starts != 0 {
+		t.Fatal("no workflow may start")
+	}
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var e map[string]any
+		_ = json.Unmarshal([]byte(line), &e)
+		if e["level"] == "ERROR" && e["batchId"] == batch && e["approvalRef"] == "APR-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected an ERROR log with the batch ID:\n%s", logs.String())
+	}
+
+	setChunkSize(t, s, "lakeshore", 250)
+	if rec := approvalCallback(s, h, batch); rec.Code != http.StatusOK {
+		t.Fatalf("within the limit the approval is delivered: %d %s", rec.Code, rec.Body)
 	}
 }

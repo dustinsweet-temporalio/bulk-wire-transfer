@@ -32,9 +32,9 @@ func reorderedBulkWireBatch(ctx workflow.Context, in BatchInput) (BatchResult, e
 	}
 	s.setPhase(ctx, PhaseDrafting)
 	var plan activities.Plan
-	s.mustStep(ctx, "plan", "Plan chunks", a.PlanChunks, activities.PlanInput{FiID: in.FiID, BatchID: in.BatchID, ChunkSize: in.ChunkSize}, &plan, true)
+	s.mustStep(ctx, onSharedQueue, "plan", "Plan chunks", a.PlanChunks, activities.PlanInput{FiID: in.FiID, BatchID: in.BatchID, ChunkSize: in.ChunkSize}, &plan, true)
 	s.applyPlan(ctx, plan)
-	s.mustStep(ctx, "gentxbatch", "Create Core batch", a.EnsureGenTxBatch, activities.EnsureInput{FiID: in.FiID, BatchID: in.BatchID,
+	s.mustStep(ctx, onCoreQueue, "gentxbatch", "Create Core batch", a.EnsureGenTxBatch, activities.EnsureInput{FiID: in.FiID, BatchID: in.BatchID,
 		CustomerID: in.CustomerID, InitiatedBy: in.InitiatedBy, RowCount: in.RowCount, AmountCents: in.TotalAmountCents}, &s.genTxBatchID, true)
 	s.checkGroupPolicies(ctx)
 	s.setCoreStatus(ctx, activities.GenTxDrafted, "", true) // MOVED: was after runChunks

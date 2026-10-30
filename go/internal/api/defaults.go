@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"bulkwire/internal/config"
+	"bulkwire/internal/routing"
 )
 
 // FIDefaults are one FI's settings for the next batch that starts.
@@ -29,11 +30,14 @@ type parsedDefaults struct {
 	approvalWindow, retryBudget, retryMaxInterval time.Duration
 }
 
-func (d FIDefaults) parse() (parsedDefaults, error) {
+// parse validates one FI's defaults. Chunk size has no artificial floor: any size from 1 up to the largest
+// batch (maxRows) is allowed. WHY: the right size depends on the downstream call (one stored-procedure call per
+// chunk here); what actually bounds a batch is its chunk COUNT, which MAX_CHUNKS_PER_BATCH guards (commands.go).
+func (d FIDefaults) parse(maxRows int) (parsedDefaults, error) {
 	var p parsedDefaults
 	var err error
-	if d.ChunkSize < 50 || d.ChunkSize > 1000 {
-		return p, fmt.Errorf("chunkSize must be 50..1000")
+	if d.ChunkSize < 1 || d.ChunkSize > maxRows {
+		return p, fmt.Errorf("chunkSize must be 1..%d", maxRows)
 	}
 	if d.Concurrency < 1 || d.Concurrency > 8 {
 		return p, fmt.Errorf("concurrency must be 1..8")
@@ -54,16 +58,18 @@ func (d FIDefaults) parse() (parsedDefaults, error) {
 
 // DraftDefaults is the in-memory per-FI store.
 type DraftDefaults struct {
-	mu   sync.RWMutex
-	byFI map[string]FIDefaults
+	mu      sync.RWMutex
+	byFI    map[string]FIDefaults
+	maxRows int
 }
 
-// NewDraftDefaults initializes every configured FI from the environment defaults.
-func NewDraftDefaults(cfg config.Config) *DraftDefaults {
-	d := &DraftDefaults{byFI: map[string]FIDefaults{}}
+// NewDraftDefaults initializes every configured FI from the environment defaults, with each FI's chunk
+// concurrency from config/routing.yaml (fiDefaults) when it has one.
+func NewDraftDefaults(cfg config.Config, routes routing.Config) *DraftDefaults {
+	d := &DraftDefaults{byFI: map[string]FIDefaults{}, maxRows: cfg.Defaults.MaxRows}
 	for _, fi := range cfg.Core.FiIDs() {
 		d.byFI[fi] = FIDefaults{
-			ChunkSize: cfg.Defaults.ChunkSize, Concurrency: cfg.Defaults.Concurrency,
+			ChunkSize: cfg.Defaults.ChunkSize, Concurrency: routes.ChunkConcurrency(fi, cfg.Defaults.Concurrency),
 			ApprovalWindow: cfg.Defaults.ApprovalWindow.String(), RetryBudget: cfg.Defaults.RetryBudget.String(),
 			RetryMaxInterval: cfg.Defaults.RetryMaxInterval.String(),
 		}
@@ -78,7 +84,7 @@ func (d *DraftDefaults) get(fiID string) (parsedDefaults, error) {
 	if !ok {
 		return parsedDefaults{}, fmt.Errorf("no draft defaults for FI %q", fiID)
 	}
-	return v.parse()
+	return v.parse(d.maxRows)
 }
 
 func (s *Server) getDraftDefaults(w http.ResponseWriter, _ *http.Request) {
@@ -107,7 +113,7 @@ func (s *Server) putDraftDefaults(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "UNKNOWN_FI", "unknown FI "+fi)
 			return
 		}
-		if _, err := v.parse(); err != nil {
+		if _, err := v.parse(s.Defaults.maxRows); err != nil {
 			writeError(w, http.StatusBadRequest, "BAD_REQUEST", fi+": "+err.Error())
 			return
 		}

@@ -1,5 +1,7 @@
-// Activity options: ONE builder used by every Activity in this workflow (claim-check reads included). There
-// are deliberately no per-Activity retry policy variants.
+// Activity options: one set of timeouts and one retry policy for every Activity in this workflow, and two
+// routes. Core-calling Activities go to the batch's Core task queue with a fairness key; the claim-check-only
+// Activity (PlanChunks) stays on the workflow's own shared queue. There are deliberately no per-Activity retry
+// policy variants.
 package workflow
 
 import (
@@ -15,7 +17,17 @@ import (
 // within a minute instead of blocking the chunk.
 const StartToClose = 60 * time.Second
 
-// coreActivityOptions:
+// route says which task queue an Activity runs on.
+type route int
+
+const (
+	// onSharedQueue: the workflow's own task queue ("bulkwire"). For Activities that never call Core.
+	onSharedQueue route = iota
+	// onCoreQueue: the batch's Core task queue (BatchInput.CoreTaskQueue), for every Activity that calls Core.
+	onCoreQueue
+)
+
+// activityOptions:
 //
 // PATTERN: Retry Policy (no attempt cap) — https://docs.temporal.io/encyclopedia/retry-policies
 // PATTERN: Fixed Wall-Time Retries — https://docs.temporal.io/design-patterns/fixed-wall-time-retries
@@ -29,8 +41,8 @@ const StartToClose = 60 * time.Second
 // come back to the workflow on the first attempt.
 //
 // No HeartbeatTimeout: every call is a sub-minute, set-based Core operation (see internal/activities).
-func coreActivityOptions(st settings, activityID, summary string) workflow.ActivityOptions {
-	return workflow.ActivityOptions{
+func activityOptions(st settings, r route, activityID, summary string) workflow.ActivityOptions {
+	o := workflow.ActivityOptions{
 		ActivityID:             activityID,
 		Summary:                summary, // shown in the Web UI (encrypted payload, masked data only)
 		StartToCloseTimeout:    StartToClose,
@@ -42,4 +54,16 @@ func coreActivityOptions(st settings, activityID, summary string) workflow.Activ
 			// NO MaximumAttempts: transient Core failures retry until success or budget exhaustion.
 		},
 	}
+	if r == onCoreQueue {
+		// PATTERN: Task Queue per Downstream (internal/routing). This FI's Core queue has its own server-side
+		// rate limit and its own worker capacity, so a slow Core backs up only this FI's queue.
+		// DETERMINISM: both values come from the workflow input, fixed at start.
+		o.TaskQueue = st.CoreTaskQueue
+		// PATTERN: Fairness — https://docs.temporal.io/develop/task-queue-priority-fairness
+		// Set on every Core Activity explicitly (the workflow start sets no Priority, so nothing is inherited).
+		// When the queue backs up, the Temporal Service dispatches round-robin across fairness keys: across this
+		// FI's batches on a single-FI queue, across FIs on a shared one.
+		o.Priority = temporal.Priority{FairnessKey: st.CoreFairnessKey}
+	}
+	return o
 }

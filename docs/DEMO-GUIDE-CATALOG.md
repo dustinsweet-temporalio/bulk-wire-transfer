@@ -4,7 +4,7 @@ Parts [1](DEMO-GUIDE-HAPPY-PATH.md) to [5](DEMO-GUIDE-PRODUCTION.md) are scripte
 short recipes for the questions an audience asks *after* the story: "What if the file is wrong?", "What if nobody
 approves?", "What if the bank's database is down for longer?". Each one takes a minute or two, and each matches a
 card in the Control Center's **Failure catalog** (the card has the button, what you'll see, and a line to say).
-The [index](#index-every-catalog-entry) at the end lists all 44 catalog entries and where each one is covered.
+The [index](#index-every-catalog-entry) at the end lists all 49 catalog entries and where each one is covered.
 
 **Every recipe starts the same way** unless it says otherwise:
 
@@ -66,7 +66,7 @@ person decides. Here the right answer is to cancel and re-upload."
 
 ### F28: the customer cancels mid-draft
 
-1. The standard start. Then **Control Center → Core load & fairness → Core lakeshore**: latency **`1500`** →
+1. The standard start. Then **Control Center → Core load & queues → Core lakeshore**: latency **`1500`** →
    **set**, so the draft lasts long enough.
 2. **Window 1 (Jordan):** **Save as draft.** After a few tiles turn green, click **Cancel batch** (top right).
 3. In **Cancel this batch?**, type a reason (for example "Wrong file") and click **Cancel batch**.
@@ -168,7 +168,7 @@ that's already running."
 
 ### F35: twenty requests at once
 
-1. **Control Center → Core load & fairness → Retry storm (F35) → Fire retry storm.** It uploads a fresh
+1. **Control Center → Core load & queues → Retry storm (F35) → Fire retry storm.** It uploads a fresh
    `summit-payroll-5000` batch as Jordan, then sends 20 **Save as draft** requests for it at the same moment, each
    with a different idempotency key.
 2. The result box shows `"statusCounts": {"202": 20}` (all twenty accepted) and `"executions": 1`.
@@ -203,7 +203,7 @@ release, however many times it's delivered.
 
 1. **Control Center → Reset → Reset demo.** Then **Failure catalog**, filter **`F26`** → **Lakeshore retry
    budget 60 s**. (The batch's retry budget is fixed when it starts; the default is 30 minutes.)
-2. **Core load & fairness → Core lakeshore:** latency **`1500`** → **set**.
+2. **Core load & queues → Core lakeshore:** latency **`1500`** → **set**.
 3. The standard start (without the reset), then **Save as draft.**
 4. When a few tiles are green: **Failure catalog → F26 → Outage 120 s.**
 5. The two in-flight tiles turn amber and retry for a minute. Then they turn **red**: hover shows
@@ -243,7 +243,7 @@ See [part 2, A3](DEMO-GUIDE-FAILURES.md#a3-watch-it-retry) (**Alerts & metrics**
 
 All of these use the standard start. The faults that count calls (F02, F05, F06) are armed *before* you click
 **Save as draft**; the rest are clicked while the draft runs, with Lakeshore latency at **`1500`** (**Core load &
-fairness**) so it lasts long enough. Every one ends at **Awaiting approval** with **4,997 drafted and 3 rejected**:
+queues**) so it lasts long enough. Every one ends at **Awaiting approval** with **4,997 drafted and 3 rejected**:
 the same as a run with no failure.
 
 | ID | Button (Control Center → Failure catalog) | What you'll see | Say |
@@ -265,14 +265,44 @@ the same as a run with no failure.
 ### F37: parallelism is a setting
 
 1. **Control Center → Reset → Reset demo.** Then **Draft defaults → lakeshore**: **concurrency** **`1`** →
-   **Save**. **Core load & fairness → Core lakeshore → reset stats.**
+   **Save**. **Core load & queues → Core lakeshore → reset stats.**
 2. The standard start (without the reset), then **Save as draft.** In a test run it took **16 seconds**, and the
    Lakeshore card said **max in-flight 1**.
-3. Reset, set concurrency **`4`**, reset stats, and draft again: **6 seconds**, **max in-flight 4**.
+3. Reset (it puts concurrency back to **`4`**, the default), reset stats, and draft again: **6 seconds**, **max
+   in-flight 4**.
 
 **Say:** "How many chunks run at once is one number in the batch's settings, enforced by a semaphore inside the
 workflow. It's not an architecture decision. And note the demo's Core latency is fixed per call: whether more
 parallelism helps a real core system is something you measure, not assume."
+
+### F49: a batch too big for one workflow history
+
+1. **Control Center → Reset → Reset demo.** Then **Failure catalog**, filter **`F49`**, click **Lakeshore chunk size 1**.
+2. **Window 1 (Jordan):** **Bulk Wire Upload** → drop `summit-payroll-5000.csv`. The review page says **Needs
+   corrections** with the banner "This file needs 5000 chunks at the bank's current chunk size of 1; one batch can
+   have at most 1300. Split the file into smaller files and upload each one." **Save as draft** is greyed
+   out, and approvers don't get an **Approve** button.
+3. Click **Restore 250** on the card.
+
+**Say:** "Chunk size is a setting with no floor: one wire per chunk is allowed. What's limited is the number of
+chunks, because each one adds events to the batch's single history. We measured a real history and cap a batch at
+1,300 chunks, which keeps it under 25,000 events. Bigger batches would need Continue-As-New or child workflows that
+each own a segment; this reference doesn't do that, so it refuses them up front, before anyone can draft or
+approve."
+
+### F46 and F47: one bank's Core workers stopped, or a call on the wrong bank's queue
+
+Narrated. In this demo both worker processes poll every queue, so you can't stop one bank's Core workers alone. The
+evidence is in tests:
+
+```bash
+make test-integration   # a real Temporal dev server with no worker on Lakeshore's Core queue (F46)
+make test-go            # TestCoreActivityOnTheWrongFIsQueueParks and workflow test W20 (F47)
+```
+
+**Say:** "With no workers for one bank's core queue, that bank's calls simply wait in its queue, and the other bank
+runs normally. And a worker only holds credentials for the bank its queue serves, so a routing mistake parks the
+chunk for an operator instead of calling the wrong bank."
 
 ### F39: catching a breaking change before it ships
 
@@ -333,7 +363,7 @@ like an outage. The unit test `Transport_and_transient_errors_are_503_and_retrya
 | F33 | Approve before draft | [Part 6, F33](#f33-approval-arrives-before-the-draft) |
 | F34 | Double click / two tabs | [Part 6, F34](#f34-two-tabs-two-clicks) |
 | F35 | Retry storm | [Part 6, F35](#f35-twenty-requests-at-once) |
-| F36 | Payroll day, two users at one FI | [Part 3, steps 1–2](DEMO-GUIDE-PAYROLL-DAY.md#2-payroll-day-with-a-per-bank-limit) |
+| F36 | Payroll day, two users at one FI | [Part 3, phases 1–2](DEMO-GUIDE-PAYROLL-DAY.md#2-turn-lakeshore-down-to-3-callss) |
 | F37 | Concurrency is a setting | [Part 6, F37](#f37-parallelism-is-a-setting) |
 | F38 | Shipped a workflow bug | [Part 5, Scenario F](DEMO-GUIDE-PRODUCTION.md#scenario-f-we-shipped-a-bug) |
 | F39 | Non-determinism before deploy | [Part 6, F39](#f39-catching-a-breaking-change-before-it-ships) |
@@ -342,3 +372,8 @@ like an outage. The unit test `Transport_and_transient_errors_are_503_and_retrya
 | F42 | Retry alerting | [Part 2, A3](DEMO-GUIDE-FAILURES.md#a3-watch-it-retry) |
 | F43 | Payload and history limits | [Part 5, E4](DEMO-GUIDE-PRODUCTION.md#e4-the-whole-story-in-one-history) |
 | F44 | Operator pauses retries during a long outage | [Part 6, F44](#f44-an-operator-pauses-the-retries) |
+| F45 | One FI's Core queue rate limited | [Part 3, phase 2](DEMO-GUIDE-PAYROLL-DAY.md#2-turn-lakeshore-down-to-3-callss) |
+| F46 | Core-queue workers for one FI stopped | [Part 6, F46 and F47](#f46-and-f47-one-banks-core-workers-stopped-or-a-call-on-the-wrong-banks-queue) |
+| F47 | Core Activity on the wrong FI's queue | [Part 6, F46 and F47](#f46-and-f47-one-banks-core-workers-stopped-or-a-call-on-the-wrong-banks-queue) |
+| F48 | Large and small batch at one FI (Fairness) | [Part 3, phase 2b](DEMO-GUIDE-PAYROLL-DAY.md#2b-a-small-batch-on-a-busy-queue) |
+| F49 | Batch exceeds maxChunksPerBatch | [Part 6, F49](#f49-a-batch-too-big-for-one-workflow-history) |

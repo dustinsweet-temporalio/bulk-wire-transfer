@@ -27,6 +27,12 @@ No `latest` tags are used anywhere. All lookups were made on **2026-10-28** agai
 | `github.com/uber-go/tally/v4` (Prometheus reporter) | `v4.1.17` | same |
 | Temporal Server source consulted for dynamic-config keys | `go.temporal.io/server v1.32.0` | read only (not a dependency) |
 
+Checked again on **2026-10-30** for the Core task queue per FI: Server 1.32.0 supports Fairness
+(`matching.enableFairness=true`, already set on the dev server) and task-queue rate limits; CLI 1.9.1 has
+`temporal task-queue config set --queue-rps-limit` / `config get` (`--help` in the pinned image), and
+`DescribeTaskQueue` reports the effective rate limit and its source. Go SDK v1.50.0 has `worker.Options`
+`TaskQueueActivitiesPerSecond`, `DisableWorkflowWorker`, and `ActivityOptions.Priority`. No upgrade was needed.
+
 ## Data stores and emulators
 
 | Component | Pinned | Notes |
@@ -52,6 +58,8 @@ No `latest` tags are used anywhere. All lookups were made on **2026-10-28** agai
 | `github.com/stretchr/testify` | `v1.12.1` |
 | `github.com/prometheus/client_golang` | `v1.25.0` | (explicit pin; tally's Prometheus reporter only requires ≥ v1.11) |
 | `github.com/prometheus/common` | `v0.72.0` | |
+| `go.yaml.in/yaml/v3` | `v3.0.5` | `config/routing.yaml` parser. Already in the module graph (indirect); made direct on 2026-10-30, same version. |
+| `google.golang.org/grpc` | `v1.84.0` | Already in the module graph (indirect); direct since 2026-10-30 for the control-service's `TaskQueueConfigAPI` interface. Same version. |
 
 ## Docker
 

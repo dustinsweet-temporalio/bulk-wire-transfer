@@ -63,7 +63,7 @@ export function StagedReview({ summary }: { summary: StagingSummary }) {
       {invalid && (
         <>
           <div className="banner danger" role="alert">
-            {count(summary.invalidRowCount)} rows need attention before this batch can be drafted. Correct the file and upload it again.
+            {summary.batchError ?? `${count(summary.invalidRowCount)} rows need attention before this batch can be drafted. Correct the file and upload it again.`}
             <span className="spacer" />
             <a className="btn" href="#" onClick={(e) => { e.preventDefault(); downloadErrors(summary.batchId, summary.fileName); }}><Download size={15} /> Download error report</a>
             <button className="btn" onClick={() => navigate("/payments/bulk-wire")}><RefreshCw size={15} /> Replace file</button>
@@ -112,7 +112,7 @@ function ErrorsTable({ batchId }: { batchId: string }) {
           <table>
             <thead><tr><th className="num">Row</th><th>Column</th><th>Problem</th></tr></thead>
             <tbody>{errors.data?.items.map((e, i) => (
-              <tr key={i}><td className="num">{e.rowNumber}</td><td className="mono">{e.column}</td><td>{e.message} <span className="secondary mono">{e.code}</span></td></tr>
+              <tr key={i}><td className="num">{e.rowNumber || "—"}</td><td className="mono">{e.column}</td><td>{e.message} <span className="secondary mono">{e.code}</span></td></tr>
             ))}</tbody>
           </table>
         </div>

@@ -76,7 +76,7 @@ afterwards. Here, the batch simply waits it out.
 1. **Control Center → Reset → Reset demo.** All eight steps say **ok**.
 2. **Window 1 (Jordan):** **Bulk Wire Upload** → drag `summit-payroll-5000.csv` onto the drop box. The review page
    opens: **Ready to draft**, 5,000 wires, $13,121,518.99, 6 groups. **Do not click Save as draft yet.**
-3. **Control Center → Core load & fairness.** On the card **Core lakeshore**, type **`1500`** in the **latency ms**
+3. **Control Center → Core load & queues.** On the card **Core lakeshore**, type **`1500`** in the **latency ms**
    box and click **set**. "done" appears next to the button.
 
    This makes every chunk take 1.5 seconds in Core, so the draft lasts long enough to break it in the middle.
@@ -154,7 +154,7 @@ restart every worker right now and the retries would carry on."
    says **Awaiting approval**:
    - **Drafted 4,997 / 5,000 · Rejected 3**: exactly the same as the happy path.
    - **Wires (bank records)** tab: "4,997 drafted, 3 rejected". No wire was lost, and none was written twice.
-3. Optional: **Control Center → Core load & fairness → Core lakeshore** shows "failed 12" (or similar): those are
+3. Optional: **Control Center → Core load & queues → Core lakeshore** shows "failed 12" (or similar): those are
    the 503s Core sent back.
 
 **Say (close):** "Core was down for 45 seconds in the middle of a 5,000-wire draft, and the batch finished whole.

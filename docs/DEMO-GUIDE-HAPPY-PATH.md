@@ -147,7 +147,7 @@ the bank's approval decision. That wait is durable: it can last up to 24 hours, 
 deployments, and costs nothing while it waits."
 
 > **Want it slower so you can talk over it?** Before clicking **Save as draft**, open Control Center → **Core load &
-> fairness** → card **Core lakeshore** → type `1500` in the latency box → **set**. Each chunk then takes
+> queues** → card **Core lakeshore** → type `1500` in the latency box → **set**. Each chunk then takes
 > 1.5 seconds and the draft lasts about 20 seconds. **Reset demo** puts it back to normal.
 
 ---
@@ -207,7 +207,7 @@ Things to point at, top to bottom:
 | Where | What it shows | Say |
 |---|---|---|
 | Header: **Deployment** `bulkwire`, **Build ID** `v1`, **Versioning Behavior** `Pinned` | Worker Versioning | "This batch runs start to finish on the code it started with." |
-| Header: **Fairness** `lakeshore` | The fairness key | "Every bank gets its fair share of the workers." |
+| **Event History** → any `ActivityTaskScheduled` for a chunk: **Task Queue** `bulkwire-core-lakeshore`, **Priority** fairness key = the batch ID | Core work runs on Lakeshore's own Core task queue | "Each bank's core system has its own queue and its own rate limit; inside it, batches take turns." |
 | Header: **History Size** about 84 KB | The whole batch's history | "5,000 wires, but the rows themselves never enter Temporal; only references do." |
 | **Input** and **Result** panels | The batch input and the final totals (4,997 authorized, 3 rejected) | "Readable here, but stored encrypted. The UI decrypts through our Codec Server." |
 | **Timeline** (scroll down) | Every chunk as a labeled Activity, and the **Approval window (24h)** timer | "The approval wait is a durable timer: no polling, no cron job." |

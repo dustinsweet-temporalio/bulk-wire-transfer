@@ -52,6 +52,8 @@ type settings struct {
 	RetryBudget      time.Duration
 	RetryMaxInterval time.Duration
 	ApprovalWindow   time.Duration
+	CoreTaskQueue    string
+	CoreFairnessKey  string
 }
 
 type batchState struct {
@@ -86,6 +88,7 @@ func newBatchState(ctx workflow.Context, in BatchInput) *batchState {
 		settings: settings{
 			ChunkSize: in.ChunkSize, Concurrency: in.Concurrency, RetryBudget: in.RetryBudget,
 			RetryMaxInterval: in.RetryMaxInterval, ApprovalWindow: in.ApprovalWindow,
+			CoreTaskQueue: in.CoreTaskQueue, CoreFairnessKey: in.CoreFairnessKey,
 		},
 		batchParkSlot: workflow.NewSemaphore(ctx, 1),
 	}

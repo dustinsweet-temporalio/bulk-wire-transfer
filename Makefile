@@ -12,7 +12,7 @@ GO_IMAGE := golang:1.27.3-alpine3.24
 # Go commands run in the pinned Go image (no local Go needed); module and build caches persist in named volumes.
 GO_RUN := docker run --rm -v "$(CURDIR):/repo" -v bulkwire-gomod:/go/pkg/mod -v bulkwire-gocache:/root/.cache/go-build -w /repo/go $(GO_IMAGE)
 
-.PHONY: help up down reset logs test test-go test-dotnet test-ui test-claimcheck e2e samples \
+.PHONY: help up down reset logs test test-go test-dotnet test-ui test-claimcheck test-integration ratelimit e2e samples \
         capture-history replay replay-nde demo-reset versioning-demo urls config-check
 
 help: ## List targets
@@ -65,6 +65,12 @@ samples: ## Write the deterministic sample CSVs to samples/
 
 capture-history: ## Export a workflow history for replay tests (WF=bulkwire/<fi>/<batch> NAME=scenario-a)
 	./scripts/capture-history.sh "$(WF)" "$(NAME)"
+
+test-integration: ## Core-queue isolation test against a real Temporal dev server (downloads Temporal CLI v1.9.1)
+	$(GO_RUN) go test -tags integration ./internal/workflow -run TestCoreQueueWorkersForOneFIStopped -count=1 -v
+
+ratelimit: ## Override one FI's Core queue rate limit without a deployment (FI=lakeshore RPS=2; RPS=default clears it)
+	./scripts/ratelimit.sh "$(FI)" "$(RPS)"
 
 replay: ## Replay captured histories against the current workflow code
 	$(GO_RUN) go test ./internal/workflow -run TestReplay -count=1 -v

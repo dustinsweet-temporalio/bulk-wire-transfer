@@ -29,11 +29,19 @@ type BatchInput struct {
 	InitiatedBy      string // uploader userId
 	RowCount         int    // valid rows
 	TotalAmountCents int64
-	ChunkSize        int           // 50..1000, default 250
-	Concurrency      int           // 1..8, default 2
+	ChunkSize        int           // 1..MAX_ROWS, default 250 (bulkwire-service enforces MAX_CHUNKS_PER_BATCH)
+	Concurrency      int           // 1..8, default 4 (per FI: config/routing.yaml fiDefaults)
 	ApprovalWindow   time.Duration // default 24h; the deadline starts when the batch reaches DRAFTED
 	RetryBudget      time.Duration // ScheduleToClose for each Core Activity; default 30m
 	RetryMaxInterval time.Duration // default 20s in the demo .env, 1–2 min in production guidance
+
+	// Where this batch's Core Activities run, resolved by bulkwire-service from config/routing.yaml when the
+	// workflow starts. PATTERN: Task Queue per Downstream (internal/routing).
+	// DETERMINISM: the workflow uses these input values and never reads configuration or the environment to
+	// choose a queue. A batch keeps the queue and fairness key it started with, even if the routing file changes
+	// while it runs; only batches started after the change use the new mapping.
+	CoreTaskQueue   string // e.g. "bulkwire-core-lakeshore"
+	CoreFairnessKey string // the batch ID on a single-FI queue; the FI ID on a queue shared by several FIs
 
 	// Staging facts, so the Event History starts with the complete story of the file.
 	FileName   string

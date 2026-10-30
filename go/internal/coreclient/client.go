@@ -42,6 +42,10 @@ func New(endpoints, internalTokens map[string]string) *Client {
 // FiIDs lists the FIs this client knows.
 func (c *Client) FiIDs() map[string]string { return c.endpoints }
 
+// Serves reports whether this client holds an endpoint for the FI. A Core-queue worker's client holds only the
+// FIs its queue serves (cmd/worker).
+func (c *Client) Serves(fiID string) bool { _, ok := c.endpoints[fiID]; return ok }
+
 // ---- Activity-facing calls ---------------------------------------------------------------------------------
 
 // EnsureGenTxBatch creates (or finds) Core's batch header. Idempotent by ExternalBatchID.

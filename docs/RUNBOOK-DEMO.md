@@ -34,13 +34,14 @@
 | summit-payroll-10000 | C (Jordan), D |
 | northline-payroll-10000 | C (Taylor) |
 | harvest-6000 | C (Riley) |
+| northline-bonus-500 | C step 4, F48 (Taylor) |
 | harvest-2000 | F08 tenant isolation |
 | summit-cold-chain-over-limit | F23 daily limit |
 | summit-vendors-with-errors | F25 invalid file |
 
 **Reset before every scenario:** Control Center → Reset → **Reset demo** (or `make demo-reset`). It unpauses and
 restarts essential services, stops worker-v2/v3, makes v1 current, terminates running batches, clears Core data, faults,
-latency and stats, removes the fairness limit, and resets draft defaults. Each scenario then starts in under 30 s.
+latency and stats, clears any Core queue rate-limit override, and resets draft defaults. Each scenario then starts in under 30 s.
 
 Useful Temporal UI saved queries (namespace `bulkwire`): `FiId = "lakeshore" AND BulkWireStatus = "DRAFTING"`,
 `NeedsAttention = true`, `InitiatedBy = "taylor"`.
@@ -51,7 +52,7 @@ Useful Temporal UI saved queries (namespace `bulkwire`): `FiId = "lakeshore" AND
 
 1. Lakeshore portal, sign in as **SUMMIT / jordan**. Bulk Wire Upload → download and upload **summit-payroll-5000**.
    Point at the Groups table: the 251-row group becomes chunks of 250 + 1.
-2. Control Center → Core load & fairness → Core lakeshore → latency ms **1500** → **set** (slows each chunk call so
+2. Control Center → Core load & queues → Core lakeshore → latency ms **1500** → **set** (slows each chunk call so
    the draft lasts long enough to show the outage).
 3. Portal: **Save as draft**. When about 5 tiles are green, Control Center → F01 → **Outage 45 s (Lakeshore)**.
 4. Watch the tiles turn amber "retry #N" (DescribeWorkflowExecution); none turns red. Control Center → Alerts &
@@ -78,26 +79,39 @@ where it stopped, then Core ran dual control. *Which primitive* — a non-retrya
 until a `resolve` Update; the approval wait is a durable timer. *What you no longer need* — dead-letter replays that
 hit the same hold again, and a separate approval workflow.
 
-## C. Payroll day: two people, one Core (4 min) — F36, F08
+## C. Payroll day: two people, one Core (5 min) — F36, F45, F48, F08
 
-1. Control Center → Core load & fairness (keep this page open: the charts only record while it is). Limit OFF.
+Each FI's Core Activities run on that FI's own Core task queue (`bulkwire-core-lakeshore`, `bulkwire-core-prairie`),
+each with its own rate limit: 10 Activities/s from `config/routing.yaml`, overridable at runtime.
+
+1. Control Center → Core load & queues (keep this page open: the charts only record while it is). Both queue lines
+   say override **none**, enforced **10/s (WORKER)**.
 2. **Launch payroll day** (Jordan/Summit 10k + Taylor/Northline 10k at Lakeshore, Riley/Harvest 6k at Prairie,
-   concurrency 4). Lakeshore runs at 12–15 calls/s with 8 in flight; all three batches are drafted in about 10 s.
-3. **Reset demo** (it removes the limit), then rps per FI = **3** → **Enable limit** → **Launch payroll day** again.
-   Lakeshore stays flat at 3 calls/s (~2 in flight at 600 ms latency) and both Lakeshore batches progress side by
-   side (~35 s); Prairie runs on its own 3/s allowance and finishes in ~10 s, not queued behind Lakeshore's backlog.
-   (The limit cannot be shown mid-run: without it the batches finish before you can click.)
-4. Optional (F08): Reset; upload at both banks; F08 → **Outage 120 s (Lakeshore)**; draft both. Prairie drafts in
-   ~5 s while Lakeshore retries.
-5. **Remove limit** (or Reset).
+   concurrency 4). Lakeshore runs at its queue's 10 calls/s (about 6 in flight); both Lakeshore batches are drafted
+   in about 10 s, Prairie's in about 6 s.
+3. **Reset demo**, then on the Core lakeshore card: rps **3** → **Set override** (the line now says override 3/s,
+   enforced 3/s (API)) → **Launch payroll day** again. Lakeshore stays flat at 3 calls/s (about 2 in flight at
+   600 ms latency) and both Lakeshore batches progress side by side (about 33 s). Prairie's queue is still at 10/s:
+   its batch drafts in about 8 s, not queued behind Lakeshore's backlog. (The override cannot be shown mid-run at
+   10/s: the batches finish before you can click.) The same override from a terminal:
+   `make ratelimit FI=lakeshore RPS=3`.
+4. Fairness inside one FI (F48): **Reset demo** → **Lakeshore queue 2/s** → **Launch comparison** (three
+   summit-payroll-5000, then Taylor's northline-bonus-500 3 s later). The 500-wire batch reaches Awaiting approval
+   in about 9 s while the large ones take about 47 s. Measured against the same run with all Lakeshore batches on
+   one fairness key: 22.5 s for the small batch. Say what it is: Fairness shortens the small batch's wait behind
+   tasks already in the queue; it does not make the queue faster.
+5. Optional (F08): Reset; upload at both banks; F08 → **Outage 120 s (Lakeshore)**; draft both. Prairie drafts in
+   about 5 s while Lakeshore retries.
+6. **Clear override** (or Reset).
 
-Close with: *What happened* — two big batches from two customers of one bank shared that bank's Core capacity, and
-the other bank never noticed. *Which primitive* — Fairness keyed by FI plus a per-key rate limit, enforced by the
-Temporal Service. *What you no longer need* — custom throttling and cross-batch coordination code.
+Close with: *What happened* — two big batches from two customers of one bank shared that bank's Core capacity, a
+small batch at the same bank was not stuck behind them, and the other bank never noticed. *Which primitive* — a
+Core task queue per FI with a server-enforced rate limit (changeable without a deployment), and Fairness keyed by
+batch ID within it. *What you no longer need* — custom throttling and cross-batch coordination code.
 
 ## D. Chaos tour (4 min) — F12, F13, F15, F10, F16
 
-1. Jordan: upload **summit-payroll-10000** → Save as draft (Core load & fairness → Lakeshore latency **5000** ms
+1. Jordan: upload **summit-payroll-10000** → Save as draft (Core load & queues → Lakeshore latency **5000** ms
    so it lasts; at 1500 ms the draft finishes during step 2). Run the steps back to back without waiting for each
    to recover.
 2. F12 → **Kill worker-a**. Tiles running on worker-a stall until StartToClose (60 s), then continue on worker-b.

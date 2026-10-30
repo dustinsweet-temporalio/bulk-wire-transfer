@@ -22,6 +22,7 @@ import (
 	"bulkwire/internal/config"
 	"bulkwire/internal/control"
 	"bulkwire/internal/coreclient"
+	"bulkwire/internal/routing"
 	"bulkwire/internal/temporalx"
 )
 
@@ -37,6 +38,13 @@ func run(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err == nil {
 		err = errors.Join(cfg.RequireCore(), cfg.RequireAuth())
+	}
+	if err != nil {
+		return err
+	}
+	routes, err := routing.Load(cfg.RoutingPath)
+	if err == nil {
+		err = routes.Validate(cfg.Core.FiIDs())
 	}
 	if err != nil {
 		return err
@@ -68,7 +76,7 @@ func run(log *slog.Logger) error {
 	}
 
 	svc := &control.Service{
-		Log: log, Cfg: cfg, Temporal: tc, Raw: raw, Codec: cdc,
+		Log: log, Cfg: cfg, Temporal: tc, Raw: raw, Codec: cdc, Routing: routes, TaskQueues: tc.WorkflowService(),
 		Docker:        control.NewDocker("/var/run/docker.sock", os.Getenv("COMPOSE_PROJECT_NAME"), splitList(os.Getenv("CHAOS_ALLOWLIST"))),
 		Core:          coreclient.New(cfg.Core.Endpoints, cfg.Core.InternalTokens),
 		Store:         store,

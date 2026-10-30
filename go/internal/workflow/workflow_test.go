@@ -1,6 +1,6 @@
-// Workflow tests W1–W18 in the Temporal test environment: the happy path, outages retried in place,
+// Workflow tests W1–W20 in the Temporal test environment: the happy path, outages retried in place,
 // park-and-resolve, validators that reject without mutating state, approve-before-draft, expiry, the semaphore,
-// and a batch whose first instruction never arrives.
+// a batch whose first instruction never arrives, and Core Activity routing (task queue, fairness key, wrong FI).
 // Activities are mocked; the workflow code under test is the production code.
 
 package workflow
@@ -18,9 +18,13 @@ import (
 	"github.com/stretchr/testify/suite"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 
 	"bulkwire/internal/activities"
 	"bulkwire/internal/model"
@@ -44,8 +48,12 @@ var testPlan = activities.Plan{
 func testInput() BatchInput {
 	return BatchInput{BatchID: "01JTEST", FiID: "lakeshore", CustomerID: "summit-logistics", InitiatedBy: "jordan",
 		RowCount: 751, TotalAmountCents: 1_500_000, ChunkSize: 250, Concurrency: 2, ApprovalWindow: 24 * time.Hour,
-		RetryBudget: 30 * time.Minute, RetryMaxInterval: 20 * time.Second, FileName: "payroll.csv", GroupCount: 2}
+		RetryBudget: 30 * time.Minute, RetryMaxInterval: 20 * time.Second, FileName: "payroll.csv", GroupCount: 2,
+		CoreTaskQueue: "bulkwire-core-lakeshore", CoreFairnessKey: "01JTEST"}
 }
+
+// testTaskQueue is the shared queue the test environment runs the workflow on.
+const testTaskQueue = "bulkwire"
 
 var errOnHold = temporal.NewNonRetryableApplicationError("ACCOUNT_ON_HOLD: account ending 0033 is on hold (HTTP 422)",
 	model.ErrTypeCoreStructural, nil, model.CoreErrorDetails{Code: "ACCOUNT_ON_HOLD", Message: "account ending 0033 is on hold", HTTPStatus: 422})
@@ -62,8 +70,10 @@ type fakeCore struct {
 	statuses     []string
 	policyCalls  int
 	activityIDs  []string
-	draftFail    map[string]error // chunkId -> error to return (until cleared)
-	transientFor map[string]int   // chunkId -> remaining transient failures
+	routes       map[string]string // activity type -> "taskQueue|fairnessKey" as scheduled
+	fairnessKeys map[string]string // activity type -> Priority.FairnessKey in its ActivityOptions
+	draftFail    map[string]error  // chunkId -> error to return (until cleared)
+	transientFor map[string]int    // chunkId -> remaining transient failures
 	authFail     map[string]error
 	deny         map[string]bool  // groupKey -> DENY
 	policyFail   map[string]error // groupKey -> error to return (until cleared)
@@ -74,7 +84,7 @@ type fakeCore struct {
 }
 
 func newFakeCore() *fakeCore {
-	return &fakeCore{draftFail: map[string]error{}, transientFor: map[string]int{}, authFail: map[string]error{}, deny: map[string]bool{}, policyFail: map[string]error{}, blocked: map[string]bool{}}
+	return &fakeCore{routes: map[string]string{}, fairnessKeys: map[string]string{}, draftFail: map[string]error{}, transientFor: map[string]int{}, authFail: map[string]error{}, deny: map[string]bool{}, policyFail: map[string]error{}, blocked: map[string]bool{}}
 }
 
 type WorkflowSuite struct {
@@ -91,6 +101,7 @@ func TestWorkflowSuite(t *testing.T) { suite.Run(t, new(WorkflowSuite)) }
 
 func (s *WorkflowSuite) SetupTest() {
 	s.env = s.NewTestWorkflowEnvironment()
+	s.env.SetStartWorkflowOptions(client.StartWorkflowOptions{TaskQueue: testTaskQueue})
 	s.core = newFakeCore()
 	s.saStatuses, s.saAttn, s.rejected = nil, nil, map[string]error{}
 	core, env := s.core, s.env
@@ -182,7 +193,42 @@ func (s *WorkflowSuite) SetupTest() {
 		core.mu.Lock()
 		defer core.mu.Unlock()
 		core.activityIDs = append(core.activityIDs, info.ActivityID)
+		core.routes[info.ActivityType.Name] = info.TaskQueue + "|" + core.fairnessKeys[info.ActivityType.Name]
 	})
+	// WHY an interceptor: the SDK test environment does not copy Priority into activity.Info, so the fairness key
+	// is read from the options the workflow scheduled the Activity with.
+	env.SetWorkerOptions(worker.Options{Interceptors: []interceptor.WorkerInterceptor{&optionsRecorder{core: core}}})
+}
+
+// optionsRecorder records each Activity type's fairness key as the workflow schedules it.
+type optionsRecorder struct {
+	interceptor.WorkerInterceptorBase
+	core *fakeCore
+}
+
+func (r *optionsRecorder) InterceptWorkflow(_ workflow.Context, next interceptor.WorkflowInboundInterceptor) interceptor.WorkflowInboundInterceptor {
+	return &recorderInbound{WorkflowInboundInterceptorBase: interceptor.WorkflowInboundInterceptorBase{Next: next}, core: r.core}
+}
+
+type recorderInbound struct {
+	interceptor.WorkflowInboundInterceptorBase
+	core *fakeCore
+}
+
+func (i *recorderInbound) Init(out interceptor.WorkflowOutboundInterceptor) error {
+	return i.Next.Init(&recorderOutbound{WorkflowOutboundInterceptorBase: interceptor.WorkflowOutboundInterceptorBase{Next: out}, core: i.core})
+}
+
+type recorderOutbound struct {
+	interceptor.WorkflowOutboundInterceptorBase
+	core *fakeCore
+}
+
+func (o *recorderOutbound) ExecuteActivity(ctx workflow.Context, activityType string, args ...any) workflow.Future {
+	o.core.mu.Lock()
+	o.core.fairnessKeys[activityType] = workflow.GetActivityOptions(ctx).Priority.FairnessKey
+	o.core.mu.Unlock()
+	return o.Next.ExecuteActivity(ctx, activityType, args...)
 }
 
 func lengthOf(chunkID string) int {
@@ -665,4 +711,49 @@ func count(xs []string, x string) int {
 		}
 	}
 	return n
+}
+
+// W19: every Core Activity runs on the batch's Core task queue with the fairness key from the input; PlanChunks
+// (claim-check only) runs on the workflow's shared queue with no fairness key.
+func (s *WorkflowSuite) TestW19CoreActivitiesRunOnTheFIsCoreQueue() {
+	s.core.authFail["g01-c00"] = errOnHold // so RejectChunk runs too (operator decision)
+	s.draftAt(0)
+	s.authorizeAt(2 * time.Hour)
+	s.resolveAt(3*time.Hour, "g01-c00", DecisionRejectChunk)
+	s.run(testInput())
+
+	core := "bulkwire-core-lakeshore|01JTEST"
+	s.Equal(map[string]string{
+		"PlanChunks":          testTaskQueue + "|",
+		"EnsureGenTxBatch":    core,
+		"CheckGroupPolicy":    core,
+		"InsertDraftChunk":    core,
+		"AuthorizeChunk":      core,
+		"RejectChunk":         core,
+		"SetGenTxBatchStatus": core,
+	}, s.core.routes)
+}
+
+// W20: a Core Activity that reaches a worker without a Core client for its FI fails with WrongFiRouting
+// (non-retryable): the chunk parks for an operator instead of failing the workflow, and RETRY runs it again once
+// routing is fixed.
+func (s *WorkflowSuite) TestW20WrongFiRoutingParksTheChunk() {
+	s.core.draftFail["g00-c01"] = temporal.NewNonRetryableApplicationError(
+		`task queue "bulkwire-core-prairie" does not serve FI "lakeshore"`, model.ErrTypeWrongFiRouting, nil)
+	s.draftAt(0)
+	s.queryAt(time.Hour, func(v BatchView) {
+		c := chunkView(v, "g00-c01")
+		s.Equal(ChunkNeedsAttention, c.State)
+		s.Equal("WRONG_FI_ROUTING", c.Attention.Code)
+		s.Equal("ROUTING", c.Attention.Source)
+		s.NotRegexp(`\d{8,}`, c.Attention.Message, "no account numbers")
+		s.core.mu.Lock()
+		delete(s.core.draftFail, "g00-c01") // routing fixed
+		s.core.mu.Unlock()
+	})
+	s.resolveAt(2*time.Hour, "g00-c01", DecisionRetry)
+	s.authorizeAt(3 * time.Hour)
+	res := s.run(testInput())
+	s.Equal(PhaseAuthorized, res.Phase)
+	s.Equal(2, count(s.insertedChunks(), "g00-c01"))
 }

@@ -65,6 +65,8 @@ func (s *batchState) shouldPark(err error) (parkReason, bool) {
 		return parkReason{Code: "CLAIM_CHECK_NOT_FOUND", Message: "staged rows are no longer available (expired or never staged); cancel and re-upload", Source: "CLAIM_CHECK"}, true
 	case model.ErrTypeStagingInvalid:
 		return parkReason{Code: "STAGING_INVALID", Message: appErr.Message(), Source: "CLAIM_CHECK"}, true
+	case model.ErrTypeWrongFiRouting:
+		return parkReason{Code: "WRONG_FI_ROUTING", Message: appErr.Message(), Source: "ROUTING"}, true
 	default:
 		return parkReason{Code: appErr.Type(), Message: appErr.Message(), Source: "Core"}, true
 	}
@@ -152,18 +154,19 @@ func (s *batchState) parkBatch(ctx workflow.Context, step string, r parkReason, 
 	return decision
 }
 
-// mustStep runs a batch-level Activity (PlanChunks, EnsureGenTxBatch, CheckGroupPolicy, SetGenTxBatchStatus) with
-// the same park-and-resolve semantics as chunks. It returns true when the step completed, false when the batch
-// was cancelled while the step was parked (or the workflow itself was cancelled: s.fatal).
-func (s *batchState) mustStep(ctx workflow.Context, step, summary string, activity any, input any, result any, allowCancel bool) bool {
-	return s.mustStepInSlot(ctx, nil, step, summary, activity, input, result, allowCancel)
+// mustStep runs a batch-level Activity (PlanChunks on the shared queue; EnsureGenTxBatch, CheckGroupPolicy,
+// SetGenTxBatchStatus on the Core queue) with the same park-and-resolve semantics as chunks. It returns true when
+// the step completed, false when the batch was cancelled while the step was parked (or the workflow itself was
+// cancelled: s.fatal).
+func (s *batchState) mustStep(ctx workflow.Context, r route, step, summary string, activity any, input any, result any, allowCancel bool) bool {
+	return s.mustStepInSlot(ctx, nil, r, step, summary, activity, input, result, allowCancel)
 }
 
 // mustStepInSlot is mustStep for a step that runs under a concurrency slot (the policy checks). The slot is
 // held only while the Activity runs: it is released before parking and re-acquired for the retry.
 // WHY: same rule as chunks (chunks.go). A parked step must not hold a slot, or a few parked policy checks
 // would stall the others. On return the slot is NOT held, whatever the outcome.
-func (s *batchState) mustStepInSlot(ctx workflow.Context, slot workflow.Semaphore, step, summary string, activity any, input any, result any, allowCancel bool) bool {
+func (s *batchState) mustStepInSlot(ctx workflow.Context, slot workflow.Semaphore, r route, step, summary string, activity any, input any, result any, allowCancel bool) bool {
 	for cycle := 0; ; cycle++ {
 		if slot != nil {
 			if err := slot.Acquire(ctx, 1); err != nil {
@@ -171,7 +174,7 @@ func (s *batchState) mustStepInSlot(ctx workflow.Context, slot workflow.Semaphor
 				return false
 			}
 		}
-		actx := workflow.WithActivityOptions(ctx, coreActivityOptions(s.settings, fmt.Sprintf("%s/r%d", step, cycle), summary))
+		actx := workflow.WithActivityOptions(ctx, activityOptions(s.settings, r, fmt.Sprintf("%s/r%d", step, cycle), summary))
 		err := workflow.ExecuteActivity(actx, activity, input).Get(actx, result)
 		if slot != nil {
 			slot.Release(1)

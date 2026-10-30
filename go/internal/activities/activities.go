@@ -19,6 +19,10 @@
 //     an operator's Activity Pause (https://docs.temporal.io/activity-operations) takes effect only after
 //     the current attempt ends, because pause is delivered through heartbeats.
 //   - Log with activity.GetLogger; never log account numbers or beneficiary data.
+//   - PATTERN: Task Queue per Downstream (internal/routing). Core-calling Activities run on their FI's Core task
+//     queue, on workers that hold Core clients for exactly the FIs that queue serves (RegisterCore); PlanChunks,
+//     which only reads the claim check, runs on the shared queue (RegisterShared). Every Core Activity first
+//     checks that this worker serves its FI (checkRouting).
 package activities
 
 import (
@@ -29,6 +33,7 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/worker"
 
 	"bulkwire/internal/claimcheck"
 	"bulkwire/internal/coreclient"
@@ -36,12 +41,49 @@ import (
 	"bulkwire/internal/staging"
 )
 
-// Activities holds the dependencies; register with w.RegisterActivity(acts). Metrics come from
+// Activities holds the dependencies; register with RegisterShared or RegisterCore. Metrics come from
 // activity.GetMetricsHandler(ctx) at call time, so no handler is stored here.
 type Activities struct {
-	Core                  *coreclient.Client
+	Core                  *coreclient.Client // Core-queue workers only: clients for the FIs that queue serves
 	ClaimCheck            claimcheck.Store
 	AlertAttemptThreshold int // CORE_RETRY_ALERT_THRESHOLD
+}
+
+// RegisterShared registers the Activities that run on the shared task queue: those that never call Core.
+// The names match the method names the workflow schedules (a.PlanChunks).
+func RegisterShared(r worker.ActivityRegistry, a *Activities) {
+	r.RegisterActivityWithOptions(a.PlanChunks, activity.RegisterOptions{Name: "PlanChunks"})
+}
+
+// RegisterCore registers every Activity that calls Core, for a worker polling one Core task queue.
+func RegisterCore(r worker.ActivityRegistry, a *Activities) {
+	for _, act := range []struct {
+		name string
+		fn   any
+	}{
+		{"EnsureGenTxBatch", a.EnsureGenTxBatch},
+		{"CheckGroupPolicy", a.CheckGroupPolicy},
+		{"InsertDraftChunk", a.InsertDraftChunk},
+		{"AuthorizeChunk", a.AuthorizeChunk},
+		{"RejectChunk", a.RejectChunk},
+		{"SetGenTxBatchStatus", a.SetGenTxBatchStatus},
+	} {
+		r.RegisterActivityWithOptions(act.fn, activity.RegisterOptions{Name: act.name})
+	}
+}
+
+// checkRouting runs first in every Core Activity. The workflow sends a batch's Core Activities to the queue
+// bulkwire-service resolved for its FI, and this worker holds Core clients only for the FIs its queue serves;
+// if those disagree (a misconfigured routing file), the call must not go to another FI's Core, or anywhere.
+// The error is non-retryable, so the chunk parks for an operator (park.go) instead of failing the workflow.
+// The message names only the FI and the queue: no account numbers.
+func (a *Activities) checkRouting(ctx context.Context, fiID string) error {
+	if a.Core != nil && a.Core.Serves(fiID) {
+		return nil
+	}
+	return temporal.NewNonRetryableApplicationError(
+		fmt.Sprintf("task queue %q does not serve FI %q: this worker holds no Core client for it (check config/routing.yaml)",
+			activity.GetInfo(ctx).TaskQueue, fiID), model.ErrTypeWrongFiRouting, nil)
 }
 
 // MetricCoreAttemptsOverThreshold counts Core Activity attempts past the alert threshold, tagged by activity and FI.
@@ -78,6 +120,9 @@ func (a *Activities) PlanChunks(ctx context.Context, in PlanInput) (Plan, error)
 
 // EnsureGenTxBatch creates (or finds) Core's batch header and returns its GenTxBatchId. Idempotent by batch ID.
 func (a *Activities) EnsureGenTxBatch(ctx context.Context, in EnsureInput) (int64, error) {
+	if err := a.checkRouting(ctx, in.FiID); err != nil {
+		return 0, err
+	}
 	a.alertOnRetries(ctx, in.FiID)
 	res, err := a.Core.EnsureGenTxBatch(ctx, in.FiID, coreclient.EnsureGenTxBatchRequest{
 		ExternalBatchID: in.BatchID, CustomerID: in.CustomerID, InitiatedBy: in.InitiatedBy,
@@ -93,6 +138,9 @@ func (a *Activities) EnsureGenTxBatch(ctx context.Context, in EnsureInput) (int6
 // PATTERN: Business Outcome as Result (https://docs.temporal.io/design-patterns/non-retryable-errors):
 // a DENY is returned as a decision, not as an error, so it is recorded and never retried.
 func (a *Activities) CheckGroupPolicy(ctx context.Context, in PolicyInput) (PolicyDecision, error) {
+	if err := a.checkRouting(ctx, in.FiID); err != nil {
+		return PolicyDecision{}, err
+	}
 	a.alertOnRetries(ctx, in.FiID)
 	res, err := a.Core.CheckGroupPolicy(ctx, in.FiID, in.GenTxBatchID, coreclient.PolicyCheckRequest{
 		GroupKey: in.Group.GroupKey, OriginatingAccount: in.Group.OriginatingAccount,
@@ -113,6 +161,9 @@ func (a *Activities) CheckGroupPolicy(ctx context.Context, in PolicyInput) (Poli
 // WHY the Activity (not the workflow) reads the rows: rows never enter workflow history; only this
 // Activity's input (a reference) and its result (counts) do.
 func (a *Activities) InsertDraftChunk(ctx context.Context, in DraftChunkInput) (ChunkDraftResult, error) {
+	if err := a.checkRouting(ctx, in.FiID); err != nil {
+		return ChunkDraftResult{}, err
+	}
 	a.alertOnRetries(ctx, in.FiID)
 	m, err := a.readManifest(ctx, in.FiID, in.BatchID)
 	if err != nil {
@@ -146,6 +197,9 @@ func (a *Activities) InsertDraftChunk(ctx context.Context, in DraftChunkInput) (
 
 // AuthorizeChunk flips one chunk's Drafted wires to Authorized. No claim-check read: the rows are in Core now.
 func (a *Activities) AuthorizeChunk(ctx context.Context, in AuthorizeChunkInput) (ChunkAuthorizeResult, error) {
+	if err := a.checkRouting(ctx, in.FiID); err != nil {
+		return ChunkAuthorizeResult{}, err
+	}
 	a.alertOnRetries(ctx, in.FiID)
 	res, err := a.Core.AuthorizeChunk(ctx, in.FiID, in.GenTxBatchID, in.ChunkID, coreclient.AuthorizeChunkRequest{ApprovalRef: in.ApprovalRef, Actor: in.Actor})
 	if err != nil {
@@ -156,6 +210,9 @@ func (a *Activities) AuthorizeChunk(ctx context.Context, in AuthorizeChunkInput)
 
 // RejectChunk carries out an operator's REJECT_CHUNK decision during the authorize phase.
 func (a *Activities) RejectChunk(ctx context.Context, in RejectChunkInput) (ChunkAuthorizeResult, error) {
+	if err := a.checkRouting(ctx, in.FiID); err != nil {
+		return ChunkAuthorizeResult{}, err
+	}
 	a.alertOnRetries(ctx, in.FiID)
 	res, err := a.Core.RejectChunk(ctx, in.FiID, in.GenTxBatchID, in.ChunkID, coreclient.RejectChunkRequest{Code: in.Code, Message: in.Message, Actor: in.Actor})
 	if err != nil {
@@ -167,6 +224,9 @@ func (a *Activities) RejectChunk(ctx context.Context, in RejectChunkInput) (Chun
 // SetGenTxBatchStatus keeps Core's batch record in step with the workflow's phase: Drafted, Authorizing,
 // Authorized, and the closing outcomes Expired, Denied, Cancelled, Rejected. Idempotent in Core.
 func (a *Activities) SetGenTxBatchStatus(ctx context.Context, in StatusInput) (GenTxBatchStatus, error) {
+	if err := a.checkRouting(ctx, in.FiID); err != nil {
+		return GenTxBatchStatus{}, err
+	}
 	a.alertOnRetries(ctx, in.FiID)
 	res, err := a.Core.SetGenTxBatchStatus(ctx, in.FiID, in.GenTxBatchID, coreclient.SetStatusRequest{Status: in.Status, Reason: in.Reason, Actor: in.Actor})
 	if err != nil {

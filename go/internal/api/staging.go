@@ -40,6 +40,7 @@ type StagingSummary struct {
 	Groups           []StagingGroup `json:"groups"`
 	UploadedBy       string         `json:"uploadedBy"`
 	UploadedAt       time.Time      `json:"uploadedAt"`
+	BatchError       string         `json:"batchError,omitempty"` // a batch-level reason the file cannot be drafted
 }
 
 type StagingGroup struct {
@@ -51,14 +52,19 @@ type StagingGroup struct {
 	ChunkCount               int    `json:"chunkCount"` // at the FI's current default chunk size (informational)
 }
 
-func (s *Server) summaryOf(m model.Manifest) StagingSummary {
-	chunkSize := s.Cfg.Defaults.ChunkSize
-	if d, err := s.Defaults.get(m.FiID); err == nil {
-		chunkSize = d.chunkSize
+// chunkSizeFor is the FI's current default chunk size.
+func (s *Server) chunkSizeFor(fiID string) int {
+	if d, err := s.Defaults.get(fiID); err == nil {
+		return d.chunkSize
 	}
+	return s.Cfg.Defaults.ChunkSize
+}
+
+func (s *Server) summaryOf(m model.Manifest) StagingSummary {
+	chunkSize := s.chunkSizeFor(m.FiID)
 	out := StagingSummary{BatchID: m.BatchID, FiID: m.FiID, CustomerID: m.CustomerID, FileName: m.FileName, Status: m.Status,
 		RowCount: m.RowCount, ValidRowCount: m.ValidRowCount, ErrorCount: m.ErrorCount, InvalidRowCount: m.InvalidRowCount(),
-		TotalAmountCents: m.TotalAmountCents, UploadedBy: m.UploadedBy, UploadedAt: m.UploadedAt, Groups: []StagingGroup{}}
+		TotalAmountCents: m.TotalAmountCents, UploadedBy: m.UploadedBy, UploadedAt: m.UploadedAt, BatchError: m.BatchError, Groups: []StagingGroup{}}
 	for _, g := range m.Groups {
 		out.Groups = append(out.Groups, StagingGroup{GroupKey: g.GroupKey, OriginatingAccountMasked: model.MaskAccount(g.OriginatingAccount),
 			ProcessDate: g.ProcessDate, RowCount: g.RowCount, TotalAmountCents: g.TotalAmountCents,
@@ -98,8 +104,9 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, c auth.Claims) {
 	m, err := staging.Stage(ctx, s.Store, s.Core, staging.Input{
 		BatchID: ulid.Make().String(), FiID: c.FiID, CustomerID: c.CustomerID, UploadedBy: c.UserID(),
 		FileName: header.Filename, Data: data, UploadedAt: now, Today: auth.LocalToday(now, fiLocation(c.FiID)),
-		MaxRows: s.Cfg.Defaults.MaxRows,
-		PageSize: s.Cfg.ClaimCheck.PageSize,
+		MaxRows:   s.Cfg.Defaults.MaxRows,
+		PageSize:  s.Cfg.ClaimCheck.PageSize,
+		ChunkSize: s.chunkSizeFor(c.FiID), MaxChunks: s.Cfg.Defaults.MaxChunks,
 	})
 	var fileErr *staging.FileError
 	switch {

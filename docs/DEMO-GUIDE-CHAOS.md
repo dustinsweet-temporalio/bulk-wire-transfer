@@ -48,7 +48,7 @@ break the platform itself, while it's in the middle of 10,000 wires."
 ## 0. Start a slow, big draft
 
 1. **Control Center → Reset → Reset demo.** All eight steps **ok**.
-2. **Control Center → Core load & fairness → Core lakeshore:** type **`5000`** in **latency ms**, click **set**.
+2. **Control Center → Core load & queues → Core lakeshore:** type **`5000`** in **latency ms**, click **set**.
    Each chunk now takes 5 seconds in Core, so the draft has about two minutes of real work: enough to break things
    in the middle of it.
 3. **Window 1 (Jordan):** **Bulk Wire Upload** → drop `summit-payroll-10000.csv`. **Ready to draft**: 10,000

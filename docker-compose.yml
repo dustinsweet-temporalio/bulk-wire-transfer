@@ -23,6 +23,8 @@ x-go-env: &go-env
   TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE}
   TEMPORAL_API_KEY: ${TEMPORAL_API_KEY:-}
   TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE}
+  # Core Activity task queue per FI, its rate limit and worker cap, and per-FI chunk concurrency.
+  ROUTING_CONFIG_PATH: /config/routing.yaml
   TEMPORAL_UI_URL: ${TEMPORAL_UI_URL}
   WORKER_DEPLOYMENT_NAME: ${WORKER_DEPLOYMENT_NAME}
   WORKER_VERSIONING_ENABLED: ${WORKER_VERSIONING_ENABLED}
@@ -43,6 +45,7 @@ x-go-env: &go-env
   DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE}
   DEFAULT_CONCURRENCY: ${DEFAULT_CONCURRENCY}
   MAX_ROWS: ${MAX_ROWS}
+  MAX_CHUNKS_PER_BATCH: ${MAX_CHUNKS_PER_BATCH}
   APPROVAL_WINDOW: ${APPROVAL_WINDOW}
   CORE_RETRY_BUDGET: ${CORE_RETRY_BUDGET}
   CORE_RETRY_MAX_INTERVAL: ${CORE_RETRY_MAX_INTERVAL}
@@ -119,9 +122,10 @@ services:
   temporal:
     image: *temporal-image
     profiles: [local-temporal]
-    # WHY single partition: Fairness and per-key rate limits are enforced per task-queue partition; one
-    # partition makes the per-FI limit exact for the demo. On Temporal Cloud, single-partition queues
-    # require a support request.
+    # Fairness is on for every queue (matching.enableFairness); each FI's Core queue keys it by batch ID.
+    # WHY single partition: a task queue's rate limit and Fairness are applied per partition; one partition
+    # makes each Core queue's limit exact for the demo. On Temporal Cloud, single-partition queues require a
+    # support request.
     command:
       - server
       - start-dev
@@ -354,7 +358,7 @@ services:
     volumes:
       - ./config:/config:ro
 
-  # DEMO-ONLY: failure injection, chaos, load, fairness limits, key rotation, reset (see docs/FAILURE-CATALOG.md).
+  # DEMO-ONLY: failure injection, chaos, load, Core queue rate limits, key rotation, reset (see docs/FAILURE-CATALOG.md).
   # It mounts the Docker socket, so it is reachable only through the gateway on localhost:3100.
   control-service:
     build:

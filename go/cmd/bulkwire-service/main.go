@@ -18,6 +18,7 @@ import (
 	"bulkwire/internal/codec"
 	"bulkwire/internal/config"
 	"bulkwire/internal/coreclient"
+	"bulkwire/internal/routing"
 	"bulkwire/internal/temporalx"
 )
 
@@ -33,6 +34,13 @@ func run(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err == nil {
 		err = errors.Join(cfg.RequireCore(), cfg.RequireAuth())
+	}
+	if err != nil {
+		return err
+	}
+	routes, err := routing.Load(cfg.RoutingPath)
+	if err == nil {
+		err = routes.Validate(cfg.Core.FiIDs())
 	}
 	if err != nil {
 		return err
@@ -62,7 +70,7 @@ func run(log *slog.Logger) error {
 
 	srv := &api.Server{
 		Log: log, Temporal: c, Store: store, Core: coreclient.New(cfg.Core.Endpoints, cfg.Core.InternalTokens),
-		Tokens: auth.NewTokens(cfg.AuthSigningKey), Cfg: cfg, Defaults: api.NewDraftDefaults(cfg), Now: time.Now,
+		Tokens: auth.NewTokens(cfg.AuthSigningKey), Cfg: cfg, Routing: routes, Defaults: api.NewDraftDefaults(cfg, routes), Now: time.Now,
 	}
 	httpSrv := &http.Server{Addr: ":8090", Handler: srv.Routes(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {

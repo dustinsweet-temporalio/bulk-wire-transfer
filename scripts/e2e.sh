@@ -2,7 +2,7 @@
 # e2e.sh — end-to-end checks against a running stack (`make up`).
 #
 # Signs in through each portal's gateway (http://localhost:3001 / :3002) and uses the Control Center API
-# (http://localhost:3100/api/control) for faults, chaos, load, fairness, and encryption. Exits non-zero on any
+# (http://localhost:3100/api/control) for faults, chaos, load, Core queue rate limits, and encryption. Exits non-zero on any
 # failed check. Takes ~15 minutes (it waits on real Core calls and real outages).
 #
 # Note: step 13 rotates the encryption key, which rewrites config/keyring.json. The script restores the committed
@@ -206,11 +206,16 @@ check "new batch carries the new key id" "$(curl -s "$C/encryption/inspect?workf
 RAW=$(docker compose exec -T temporal temporal workflow show --namespace bulkwire --address 127.0.0.1:7233 -w "bulkwire/lakeshore/$B11" -o json | jq -c '{payloads: [.events[0].workflowExecutionStartedEventAttributes.input.payloads[0]]}')
 check "old batch ($OLDKEY) still decodes via the Codec Server" "$(curl -s -X POST http://localhost:8089/decode -H 'Content-Type: application/json' -H 'X-Namespace: bulkwire' -d "$RAW" | jq -r '.payloads[0].data | @base64d | fromjson | .BatchID')" "$B11"
 
-step "14. Fairness: per-FI limit 3/s during payroll day"
+step "14. Core queue per FI: Lakeshore's queue at 3/s during payroll day; Prairie unaffected"
 cpost /reset >/dev/null
-cput /fairness '{"enabled":true,"rpsPerFi":3}' >/dev/null
+rates() { curl -s "$C/ratelimits" | jq -r '[.[] | "\(.taskQueue)=\(.effectiveRps)/\(.effectiveSource)"] | join(" ")'; }
+cput /ratelimits/lakeshore '{"rps":3}' >/dev/null
+check "Lakeshore override 3/s; Prairie at its routing.yaml rate" "$(rates)" "bulkwire-core-lakeshore=3/API bulkwire-core-prairie=10/WORKER"
 L=$(cpost /load/payroll-day '{"batches":[{"fiId":"lakeshore","userId":"jordan","sample":"summit-payroll-10000","concurrency":4},{"fiId":"lakeshore","userId":"taylor","sample":"northline-payroll-10000","concurrency":4},{"fiId":"prairie","userId":"riley","sample":"harvest-6000","concurrency":4}]}')
-sleep 12
+LB=$(echo "$L" | jq -r '[.[] | select(.fiId=="lakeshore")][0].batchId'); PB=$(echo "$L" | jq -r '.[] | select(.fiId=="prairie") | .batchId')
+R=$(login prairie HARVEST riley)
+check "Prairie batch drafts at normal speed" "$(wait_phase 3002 "$R" "$PB" DRAFTED 60)" DRAFTED
+check "while Lakeshore's batches are still drafting" "$(phase 3001 "$J" "$LB")" DRAFTING
 MAX=0; SEEN=no
 for _ in $(seq 1 10); do
   v=$(curl -s "$C/core/stats" | jq -r .lakeshore.callsPerSecond.last10s)
@@ -219,9 +224,32 @@ for _ in $(seq 1 10); do
   sleep 2
 done
 check "Lakeshore callsPerSecond (10 s) <= 3.5 over 20 s (max $MAX)" "$SEEN $(echo "$MAX" | awk '{print ($1 > 0 && $1 <= 3.5) ? "yes" : "no"}')" "yes yes"
-R=$(login prairie HARVEST riley)
-check "Prairie batch progresses" "$(wait_phase 3002 "$R" "$(echo "$L" | jq -r '.[] | select(.fiId=="prairie") | .batchId')" DRAFTED 240)" DRAFTED
-cput /fairness '{"enabled":false,"rpsPerFi":0}' >/dev/null
+HIST=$(docker compose exec -T temporal temporal workflow show --namespace bulkwire --address 127.0.0.1:7233 -w "bulkwire/lakeshore/$LB" -o json)
+check "Lakeshore Core Activities run on bulkwire-core-lakeshore; PlanChunks on bulkwire" \
+  "$(echo "$HIST" | jq -r '[.events[] | .activityTaskScheduledEventAttributes // empty | "\(.activityType.name)@\(.taskQueue.name)"] | unique | join(" ")')" \
+  "CheckGroupPolicy@bulkwire-core-lakeshore EnsureGenTxBatch@bulkwire-core-lakeshore InsertDraftChunk@bulkwire-core-lakeshore PlanChunks@bulkwire"
+check "Core Activities carry the batch ID as fairness key" \
+  "$(echo "$HIST" | jq -r '[.events[] | .activityTaskScheduledEventAttributes // empty | select(.taskQueue.name != "bulkwire") | .priority.fairnessKey] | unique | join(" ")')" "$LB"
+cpost /reset >/dev/null
+check "reset clears the override: both queues back at the workers' rate" "$(rates)" "bulkwire-core-lakeshore=10/WORKER bulkwire-core-prairie=10/WORKER"
+
+step "15. History guard: MAX_CHUNKS_PER_BATCH (1,300)"
+chunk_size() { cput /draft-defaults/lakeshore "$(curl -s "$C/draft-defaults/lakeshore" | jq -c ".chunkSize=$1")" >/dev/null; }
+J=$(login lakeshore SUMMIT jordan); A=$(login lakeshore SUMMIT alex); S=$(login lakeshore SUMMIT sam)
+chunk_size 1
+stage 3001 "$J" summit-payroll-5000
+check "chunk size 1: staged INVALID with the reason on the review screen" "$(echo "$SUMMARY" | jq -r '"\(.status) \(.batchError // "" | test("needs 5000 chunks"))"')" "INVALID true"
+check "it cannot be drafted" "$(draft 3001 "$J" "$BATCH" K15)" 409
+chunk_size 250
+stage 3001 "$J" summit-payroll-5000; B15=$BATCH
+chunk_size 1
+check "backstop at Draft (chunk size lowered after staging)" "$(bw 3001 "$J" "/batches/$B15/draft" -X POST -H 'Idempotency-Key: K15b' | jq -r .code)" BATCH_TOO_MANY_CHUNKS
+approve 3001 "$A" "$B15" >/dev/null
+check "backstop on Core's approval callback: Core is told it failed" "$(approve 3001 "$S" "$B15" | jq -r '"\(.status) \(.orchestration)"')" "APPROVED NOTIFY_FAILED"
+ERRSEL="select(.level==\"ERROR\" and .batchId==\"$B15\") | .batchId" # a variable: see the bash 3.2 note in step 4
+check "and bulkwire-service logs it at ERROR with the batch ID" \
+  "$(docker compose logs --no-log-prefix bulkwire-service 2>/dev/null | jq -Rr 'fromjson? // empty' | jq -r "$ERRSEL" | head -1)" "$B15"
+cpost /reset >/dev/null
 
 cp /tmp/e2e-keyring.json config/.keyring.json.tmp && mv config/.keyring.json.tmp config/keyring.json
 echo

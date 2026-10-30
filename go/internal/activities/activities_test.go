@@ -188,3 +188,52 @@ func TestRetryAlertMetricFiresOnlyPastThreshold(t *testing.T) {
 		t.Fatalf("counts %v", h.counts)
 	}
 }
+
+// TestCoreActivityOnTheWrongFIsQueueParks: a worker built for bulkwire-core-prairie holds a Core client for Prairie
+// only. A Lakeshore Core Activity that reaches it fails with WrongFiRouting, non-retryable (so the chunk parks),
+// before any HTTP call, and the message names only the FI and the queue.
+func TestCoreActivityOnTheWrongFIsQueueParks(t *testing.T) {
+	calls := 0
+	prairie := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++ }))
+	defer prairie.Close()
+	acts := &Activities{Core: coreclient.New(map[string]string{"prairie": prairie.URL}, map[string]string{"prairie": "tok-p"}), ClaimCheck: claimcheck.NewMemory()}
+	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
+	RegisterCore(env, acts)
+
+	for name, run := range map[string]func() error{
+		"EnsureGenTxBatch": func() error {
+			_, err := env.ExecuteActivity(acts.EnsureGenTxBatch, EnsureInput{FiID: "lakeshore", BatchID: "01J"})
+			return err
+		},
+		"CheckGroupPolicy": func() error {
+			_, err := env.ExecuteActivity(acts.CheckGroupPolicy, PolicyInput{FiID: "lakeshore", Group: model.GroupInfo{OriginatingAccount: "4401220033"}})
+			return err
+		},
+		"InsertDraftChunk": func() error {
+			_, err := env.ExecuteActivity(acts.InsertDraftChunk, DraftChunkInput{FiID: "lakeshore", BatchID: "01J"})
+			return err
+		},
+		"AuthorizeChunk": func() error {
+			_, err := env.ExecuteActivity(acts.AuthorizeChunk, AuthorizeChunkInput{FiID: "lakeshore"})
+			return err
+		},
+		"RejectChunk": func() error {
+			_, err := env.ExecuteActivity(acts.RejectChunk, RejectChunkInput{FiID: "lakeshore"})
+			return err
+		},
+		"SetGenTxBatchStatus": func() error {
+			_, err := env.ExecuteActivity(acts.SetGenTxBatchStatus, StatusInput{FiID: "lakeshore", Status: GenTxDrafted})
+			return err
+		},
+	} {
+		var appErr *temporal.ApplicationError
+		if err := run(); !errors.As(err, &appErr) || appErr.Type() != model.ErrTypeWrongFiRouting || !appErr.NonRetryable() {
+			t.Fatalf("%s: got %v, want non-retryable %s", name, err, model.ErrTypeWrongFiRouting)
+		} else if !strings.Contains(appErr.Message(), `does not serve FI "lakeshore"`) || strings.Contains(appErr.Message(), "4401220033") {
+			t.Fatalf("%s: message %q", name, appErr.Message())
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("no Core may be called for a wrong-FI Activity; got %d calls", calls)
+	}
+}

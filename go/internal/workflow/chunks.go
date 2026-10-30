@@ -5,9 +5,10 @@
 // PATTERN: Resumable Activity — https://docs.temporal.io/design-patterns/resumable-activity
 //
 // Every chunk is ONE Activity inside this one workflow (no child workflows). A workflow semaphore keeps at
-// most `concurrency` chunk Activities in flight, which is how this batch limits its own load on Core (across
-// batches, the per-FI Fairness rate limit protects Core; see internal/control/fairness.go). A chunk that fails structurally parks
-// alone and releases its slot, so the other chunks keep flowing.
+// most `concurrency` chunk Activities in flight, which is how this batch limits its own load on Core. Across
+// batches, the FI's Core task queue protects Core: its rate limit caps how fast Core Activities start, and
+// Fairness keyed by batch ID shares that rate among the FI's batches (options.go, internal/routing). A chunk
+// that fails structurally parks alone and releases its slot, so the other chunks keep flowing.
 package workflow
 
 import (
@@ -132,7 +133,7 @@ func (s *batchState) insertChunk(ctx workflow.Context, c *chunk, force *activiti
 	if force != nil {
 		summary += " · write as Rejected " + force.Code
 	}
-	actx := workflow.WithActivityOptions(ctx, coreActivityOptions(s.settings, c.ActivityID, summary))
+	actx := workflow.WithActivityOptions(ctx, activityOptions(s.settings, onCoreQueue, c.ActivityID, summary))
 	var res activities.ChunkDraftResult
 	err := workflow.ExecuteActivity(actx, a.InsertDraftChunk, activities.DraftChunkInput{
 		FiID: s.in.FiID, BatchID: s.in.BatchID, GenTxBatchID: s.genTxBatchID, Chunk: c.Ref, ForceReject: force, Actor: activities.Actor,
@@ -151,7 +152,7 @@ func (s *batchState) insertChunk(ctx workflow.Context, c *chunk, force *activiti
 // authorizeChunk flips one chunk's Drafted wires to Authorized in Core.
 func (s *batchState) authorizeChunk(ctx workflow.Context, c *chunk) error {
 	summary := fmt.Sprintf("Authorize chunk %s · %d wires · %s", c.Ref.ChunkID, c.Drafted, s.authorization.ApprovalRef)
-	actx := workflow.WithActivityOptions(ctx, coreActivityOptions(s.settings, c.ActivityID, summary))
+	actx := workflow.WithActivityOptions(ctx, activityOptions(s.settings, onCoreQueue, c.ActivityID, summary))
 	var res activities.ChunkAuthorizeResult
 	err := workflow.ExecuteActivity(actx, a.AuthorizeChunk, activities.AuthorizeChunkInput{
 		FiID: s.in.FiID, GenTxBatchID: s.genTxBatchID, ChunkID: c.Ref.ChunkID, ApprovalRef: s.authorization.ApprovalRef, Actor: activities.Actor,
@@ -174,7 +175,7 @@ func (s *batchState) rejectChunkByOperator(ctx workflow.Context, c *chunk, phase
 	if phase == PhaseDrafting {
 		return s.insertChunk(ctx, c, &activities.ForceReject{Code: operatorRejectedCode, Message: message})
 	}
-	actx := workflow.WithActivityOptions(ctx, coreActivityOptions(s.settings, c.ActivityID,
+	actx := workflow.WithActivityOptions(ctx, activityOptions(s.settings, onCoreQueue, c.ActivityID,
 		fmt.Sprintf("Reject chunk %s · %s · operator decision", c.Ref.ChunkID, s.groupLabel(c))))
 	var res activities.ChunkAuthorizeResult
 	err := workflow.ExecuteActivity(actx, a.RejectChunk, activities.RejectChunkInput{

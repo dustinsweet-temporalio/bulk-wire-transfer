@@ -37,10 +37,15 @@ import (
 // (same Update ID), because nothing was half-done.
 const updateTimeout = 15 * time.Second
 
-// batchInput copies the manifest and the FI's CURRENT draft defaults into the workflow input. From then on
-// the running batch never changes behavior, whatever happens to the defaults.
+// batchInput copies the manifest, the FI's CURRENT draft defaults, and the FI's Core route (config/routing.yaml)
+// into the workflow input. From then on the running batch never changes behavior, whatever happens to the
+// defaults or to the routing file.
 func (s *Server) batchInput(m model.Manifest) (workflow.BatchInput, error) {
 	d, err := s.Defaults.get(m.FiID)
+	if err != nil {
+		return workflow.BatchInput{}, err
+	}
+	route, err := s.Routing.Resolve(m.FiID, m.BatchID)
 	if err != nil {
 		return workflow.BatchInput{}, err
 	}
@@ -49,8 +54,39 @@ func (s *Server) batchInput(m model.Manifest) (workflow.BatchInput, error) {
 		RowCount: m.ValidRowCount, TotalAmountCents: m.TotalAmountCents,
 		ChunkSize: d.chunkSize, Concurrency: d.concurrency, ApprovalWindow: d.approvalWindow,
 		RetryBudget: d.retryBudget, RetryMaxInterval: d.retryMaxInterval,
+		CoreTaskQueue: route.CoreTaskQueue, CoreFairnessKey: route.CoreFairnessKey,
 		FileName: m.FileName, FileSHA256: m.FileSHA256, UploadedAt: m.UploadedAt, GroupCount: len(m.Groups),
 	}, nil
+}
+
+// tooManyChunksError: the batch would need more chunks than MAX_CHUNKS_PER_BATCH at the chunk size it would start
+// with. Staging already marks such a batch INVALID; this is the backstop for a chunk size lowered since staging.
+type tooManyChunksError struct{ chunks, chunkSize, max int }
+
+func (e *tooManyChunksError) Error() string {
+	return staging.ChunkLimitMessage(e.chunks, e.chunkSize, e.max)
+}
+
+// checkChunkLimit is the backstop of the history guard (internal/config: MaxChunksPerBatchDefault), run before
+// Update-with-Start. It applies only to a batch whose workflow does NOT exist yet: an existing execution keeps
+// the input it started with, so a later chunk-size change must never block its Updates.
+func (s *Server) checkChunkLimit(ctx context.Context, m model.Manifest, in workflow.BatchInput) error {
+	n := staging.ChunkCount(m.Groups, in.ChunkSize)
+	if n <= s.Cfg.Defaults.MaxChunks {
+		return nil
+	}
+	_, err := s.Temporal.DescribeWorkflowExecution(ctx, temporalx.WorkflowID(m.FiID, m.BatchID), "")
+	var notFound *serviceerror.NotFound
+	switch {
+	case err == nil:
+		return nil // already started; the Update goes to the existing execution
+	case !errors.As(err, &notFound):
+		return err
+	}
+	s.Log.Warn("batch exceeds MAX_CHUNKS_PER_BATCH; not starting its workflow. Batches of this shape need "+
+		"Continue-As-New or child workflows that each own a segment of the batch",
+		"fi", m.FiID, "batchId", m.BatchID, "chunks", n, "chunkSize", in.ChunkSize, "maxChunksPerBatch", s.Cfg.Defaults.MaxChunks)
+	return &tooManyChunksError{chunks: n, chunkSize: in.ChunkSize, max: s.Cfg.Defaults.MaxChunks}
 }
 
 func (s *Server) startOptions(m model.Manifest) client.StartWorkflowOptions {
@@ -74,10 +110,8 @@ func (s *Server) startOptions(m model.Manifest) client.StartWorkflowOptions {
 			auth.CustomerName(m.FiID, m.CustomerID), m.ValidRowCount, model.FormatDollars(m.TotalAmountCents)),
 		StaticDetails: fmt.Sprintf("**File:** %s\n\n**SHA-256:** `%s`\n\n**Uploaded:** %s by %s\n\n**Groups:** %d (originating account + process date)\n\n**Batch ID:** %s",
 			m.FileName, m.FileSHA256, m.UploadedAt.UTC().Format(time.RFC3339), m.UploadedBy, len(m.Groups), m.BatchID),
-		// PATTERN: Fairness by Tenant — https://docs.temporal.io/develop/task-queue-priority-fairness
-		// Every Activity this workflow schedules inherits the key, so the Temporal Service dispatches Core
-		// work fairly across FIs sharing the task queue (and can rate-limit per FI).
-		Priority: temporal.Priority{FairnessKey: m.FiID},
+		// WHY no Priority here: nothing on the shared queue needs a fairness key. Each Core Activity sets its own
+		// (the batch ID, or the FI on a shared queue) from the workflow input; see workflow/options.go.
 	}
 }
 
@@ -89,6 +123,9 @@ func (s *Server) updateWithStart(ctx context.Context, m model.Manifest, name, up
 	}
 	ctx, cancel := context.WithTimeout(ctx, updateTimeout)
 	defer cancel()
+	if err := s.checkChunkLimit(ctx, m, in); err != nil {
+		return workflow.BatchView{}, err
+	}
 	startOp := s.Temporal.NewWithStartWorkflowOperation(s.startOptions(m), workflow.BulkWireBatch, in)
 	handle, err := s.Temporal.UpdateWithStartWorkflow(ctx, client.UpdateWithStartWorkflowOptions{
 		StartWorkflowOperation: startOp,
@@ -131,7 +168,10 @@ func (s *Server) writeCommandError(ctx context.Context, w http.ResponseWriter, w
 	var rejected *temporal.ApplicationError
 	var timeout *client.WorkflowUpdateServiceTimeoutOrCanceledError
 	var notFound *serviceerror.NotFound
+	var tooMany *tooManyChunksError
 	switch {
+	case errors.As(err, &tooMany):
+		writeError(w, http.StatusConflict, "BATCH_TOO_MANY_CHUNKS", tooMany.Error())
 	case errors.As(err, &already):
 		writeError(w, http.StatusConflict, "BATCH_CLOSED", "This batch is closed; it cannot be changed or restarted.")
 	case errors.As(err, &rejected):
@@ -290,6 +330,16 @@ func (s *Server) internalApproval(w http.ResponseWriter, r *http.Request) {
 	wfID := temporalx.WorkflowID(m.FiID, m.BatchID)
 	view, err := s.updateWithStart(r.Context(), m, workflow.UpdateAuthorize, body.ApprovalRef,
 		workflow.AuthorizeRequest{ApprovalRef: body.ApprovalRef, Approvers: body.Approvers, ApprovedAt: body.ApprovedAt})
+	var tooMany *tooManyChunksError
+	if errors.As(err, &tooMany) {
+		// WHY an error and not a silent drop: Core has already recorded this approval. Core gets a 409 (it marks
+		// the notification failed, visible to the approver and to bank operations) and the failure is logged at
+		// ERROR so on-call sees an approved batch that cannot run.
+		s.Log.Error("approval callback rejected: batch exceeds MAX_CHUNKS_PER_BATCH; Core holds an approval for a batch that cannot start",
+			"fi", m.FiID, "batchId", m.BatchID, "approvalRef", body.ApprovalRef, "err", err)
+		s.writeCommandError(r.Context(), w, wfID, err)
+		return
+	}
 	if err != nil {
 		// A duplicate callback after the batch already completed with THIS approval is a success, not an error.
 		if v, ok := s.queryView(r.Context(), wfID); ok && v.Phase == workflow.PhaseAuthorized &&

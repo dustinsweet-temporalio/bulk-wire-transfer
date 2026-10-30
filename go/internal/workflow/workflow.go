@@ -10,7 +10,9 @@
 // are NOT recorded as separate events (only the final attempt's Started/Completed). 5,000 rows at 250 per
 // chunk: 20 draft chunks + 20 authorize chunks + ~6 policy checks + ~5 single steps ≈ 51 Activities ≈ 300
 // events, plus Updates and one timer. That is far below the 10,240-event warning and the "few thousand
-// events" guidance. Reference: https://docs.temporal.io/workflow-execution/limits
+// events" guidance. Chunk size has no floor, so the chunk COUNT is what can grow: bulkwire-service rejects a
+// batch above MAX_CHUNKS_PER_BATCH before this workflow starts (measurement and arithmetic in
+// internal/config: MaxChunksPerBatchDefault). Reference: https://docs.temporal.io/workflow-execution/limits
 package workflow
 
 import (
@@ -58,13 +60,13 @@ func BulkWireBatch(ctx workflow.Context, in BatchInput) (BatchResult, error) {
 	s.setPhase(ctx, PhaseDrafting)
 
 	var plan activities.Plan
-	if !s.mustStep(ctx, "plan", fmt.Sprintf("Plan chunks · %d wires · chunk size %d", in.RowCount, in.ChunkSize),
+	if !s.mustStep(ctx, onSharedQueue, "plan", fmt.Sprintf("Plan chunks · %d wires · chunk size %d", in.RowCount, in.ChunkSize),
 		a.PlanChunks, activities.PlanInput{FiID: in.FiID, BatchID: in.BatchID, ChunkSize: in.ChunkSize}, &plan, true) {
 		return s.stopped(ctx)
 	}
 	s.applyPlan(ctx, plan)
 
-	if !s.mustStep(ctx, "gentxbatch", "Create Core batch · "+dollars(in.TotalAmountCents),
+	if !s.mustStep(ctx, onCoreQueue, "gentxbatch", "Create Core batch · "+dollars(in.TotalAmountCents),
 		a.EnsureGenTxBatch, activities.EnsureInput{FiID: in.FiID, BatchID: in.BatchID, CustomerID: in.CustomerID,
 			InitiatedBy: in.InitiatedBy, RowCount: in.RowCount, AmountCents: in.TotalAmountCents}, &s.genTxBatchID, true) {
 		return s.stopped(ctx)
@@ -179,7 +181,7 @@ func (s *batchState) stopped(ctx workflow.Context) (BatchResult, error) {
 // setCoreStatus keeps Core's batch record in step with the workflow's phase.
 func (s *batchState) setCoreStatus(ctx workflow.Context, status, reason string, allowCancel bool) bool {
 	var out activities.GenTxBatchStatus
-	return s.mustStep(ctx, "status-"+strings.ToLower(status), "Set Core batch status → "+status,
+	return s.mustStep(ctx, onCoreQueue, "status-"+strings.ToLower(status), "Set Core batch status → "+status,
 		a.SetGenTxBatchStatus, activities.StatusInput{FiID: s.in.FiID, GenTxBatchID: s.genTxBatchID, Status: status,
 			Reason: reason, Actor: activities.Actor}, &out, allowCancel)
 }
@@ -208,7 +210,7 @@ func (s *batchState) checkGroupPolicies(ctx workflow.Context) {
 			var d activities.PolicyDecision
 			summary := fmt.Sprintf("Policy check %s · %s · %s", maskedGroup(g), g.Info.ProcessDate, dollars(g.Info.TotalAmountCents))
 			// The slot is held only while the check runs; a parked check releases it (mustStepInSlot).
-			if !s.mustStepInSlot(gctx, sem, fmt.Sprintf("policy/g%02d", i), summary, a.CheckGroupPolicy,
+			if !s.mustStepInSlot(gctx, sem, onCoreQueue, fmt.Sprintf("policy/g%02d", i), summary, a.CheckGroupPolicy,
 				activities.PolicyInput{FiID: s.in.FiID, GenTxBatchID: s.genTxBatchID, Group: g.Info}, &d, true) {
 				return
 			}

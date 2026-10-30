@@ -14,7 +14,7 @@ const SECTIONS = [
   ["overview", "Overview", Overview],
   ["batches", "Batches", Batches],
   ["catalog", "Failure catalog", CatalogSection],
-  ["load", "Core load & fairness", Load],
+  ["load", "Core load & queues", Load],
   ["defaults", "Draft defaults", DraftDefaults],
   ["encryption", "Encryption", Encryption],
   ["versioning", "Versioning", Versioning],

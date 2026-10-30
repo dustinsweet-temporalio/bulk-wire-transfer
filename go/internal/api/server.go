@@ -26,6 +26,7 @@ import (
 	"bulkwire/internal/auth"
 	"bulkwire/internal/claimcheck"
 	"bulkwire/internal/config"
+	"bulkwire/internal/routing"
 	"bulkwire/internal/staging"
 )
 
@@ -50,6 +51,7 @@ type Server struct {
 	Core     staging.AccountChecker
 	Tokens   *auth.Tokens
 	Cfg      config.Config
+	Routing  routing.Config // Core task queue per FI, resolved into each workflow's input at start
 	Defaults *DraftDefaults
 	Now      func() time.Time
 }

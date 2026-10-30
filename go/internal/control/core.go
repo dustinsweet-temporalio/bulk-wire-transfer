@@ -135,8 +135,8 @@ func (s *Service) putDraftDefaults(w http.ResponseWriter, r *http.Request) {
 }
 
 // envDefaults are the .env draft defaults, used by reset.
-func (s *Service) envDefaults() map[string]any {
+func (s *Service) envDefaults(fiID string) map[string]any {
 	d := s.Cfg.Defaults
-	return map[string]any{"chunkSize": d.ChunkSize, "concurrency": d.Concurrency, "approvalWindow": d.ApprovalWindow.String(),
+	return map[string]any{"chunkSize": d.ChunkSize, "concurrency": s.Routing.ChunkConcurrency(fiID, d.Concurrency), "approvalWindow": d.ApprovalWindow.String(),
 		"retryBudget": d.RetryBudget.String(), "retryMaxInterval": d.RetryMaxInterval.String()}
 }

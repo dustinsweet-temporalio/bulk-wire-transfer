@@ -22,7 +22,11 @@ const (
 	// ErrTypeStagingInvalid: the manifest says INVALID (defense in depth; drafting refuses invalid batches).
 	// Non-retryable: parks.
 	ErrTypeStagingInvalid = "StagingInvalid"
+	// ErrTypeWrongFiRouting: a Core Activity reached a worker that holds no Core client for its FI (the batch's
+	// Core queue does not serve that FI: a routing misconfiguration). Non-retryable: retrying on the same queue
+	// cannot fix it, so the chunk parks for an operator instead of failing the workflow.
+	ErrTypeWrongFiRouting = "WrongFiRouting"
 )
 
 // NonRetryableErrorTypes are the types that park a chunk when an Activity returns them.
-var NonRetryableErrorTypes = []string{ErrTypeCoreStructural, ErrTypeCoreContract, ErrTypeClaimCheckNotFound, ErrTypeStagingInvalid}
+var NonRetryableErrorTypes = []string{ErrTypeCoreStructural, ErrTypeCoreContract, ErrTypeClaimCheckNotFound, ErrTypeStagingInvalid, ErrTypeWrongFiRouting}

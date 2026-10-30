@@ -2,7 +2,7 @@
 //
 // Everything that exists only to demonstrate the design lives here, isolated from the production-shaped
 // services: failure injection (Core faults, latency, holds), chaos through the Docker Engine API (kill, stop,
-// pause, restart), load generation (payroll day, retry storm), the per-FI fairness rate limit, encryption key
+// pause, restart), load generation (payroll day, retry storm), the per-FI Core queue rate limit, encryption key
 // rotation and the payload inspector, the Worker Versioning walkthrough, and the one-click reset. Production
 // services (bulkwire-service, the workers, core-api) contain only small, labeled DEMO-ONLY hooks.
 //
@@ -24,20 +24,23 @@ import (
 	"bulkwire/internal/codec"
 	"bulkwire/internal/config"
 	"bulkwire/internal/coreclient"
+	"bulkwire/internal/routing"
 )
 
 // Service holds the control-service dependencies.
 type Service struct {
-	Log      *slog.Logger
-	Cfg      config.Config
-	Temporal client.Client // encrypting DataConverter
-	Raw      client.Client // DEFAULT DataConverter: shows payloads exactly as the Temporal Service stores them
-	Codec    *codec.Codec
-	Docker   ContainerAPI
-	Core     *coreclient.Client
-	Store    claimcheck.Store
-	Tokens   *auth.Tokens
-	HTTP     *http.Client
+	Log        *slog.Logger
+	Cfg        config.Config
+	Temporal   client.Client // encrypting DataConverter
+	Raw        client.Client // DEFAULT DataConverter: shows payloads exactly as the Temporal Service stores them
+	Codec      *codec.Codec
+	Routing    routing.Config     // config/routing.yaml: each FI's Core queue and its configured limits
+	TaskQueues TaskQueueConfigAPI // Temporal.WorkflowService() (DescribeTaskQueue, UpdateTaskQueueConfig)
+	Docker     ContainerAPI
+	Core       *coreclient.Client
+	Store      claimcheck.Store
+	Tokens     *auth.Tokens
+	HTTP       *http.Client
 	// WorkerMetrics maps a worker name to its Prometheus endpoint (WORKER_METRICS_URLS).
 	WorkerMetrics map[string]string
 }
@@ -55,8 +58,8 @@ func (s *Service) Routes() http.Handler {
 	mux.HandleFunc("GET /api/batches", s.batches)
 	mux.HandleFunc("GET /api/draft-defaults/{fiId}", s.getDraftDefaults)
 	mux.HandleFunc("PUT /api/draft-defaults/{fiId}", s.putDraftDefaults)
-	mux.HandleFunc("GET /api/fairness", s.getFairness)
-	mux.HandleFunc("PUT /api/fairness", s.putFairness)
+	mux.HandleFunc("GET /api/ratelimits", s.getRateLimits)
+	mux.HandleFunc("PUT /api/ratelimits/{fiId}", s.putRateLimit)
 	mux.HandleFunc("POST /api/load/payroll-day", s.payrollDay)
 	mux.HandleFunc("POST /api/load/retry-storm", s.retryStorm)
 	mux.HandleFunc("POST /api/claimcheck/expire", s.expireStaged)

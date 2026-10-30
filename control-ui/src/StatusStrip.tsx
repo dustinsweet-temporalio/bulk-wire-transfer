@@ -1,5 +1,5 @@
-// Always-visible status strip: Temporal, workers (with build IDs), each Core and its SQL Server, the claim-check
-// backend, bulkwire-service, and the active encryption key. Color = healthy / degraded / down / paused.
+// Always-visible status strip: Temporal, workers (with build IDs), each FI's Core task queue (rate limit, override,
+// pollers), each Core and its SQL Server, the claim-check backend, bulkwire-service, and the active encryption key. Color = healthy / degraded / down / paused.
 import type { Container, Status } from "./api";
 import { Chip, type Health } from "./components";
 
@@ -38,6 +38,10 @@ export function StatusStrip({ status, error }: { status?: Status; error: boolean
         return <Chip key={w} label={w} health={optional && h === "down" ? "off" : h} detail={optional ? w.slice(-2) : "v1"} />;
       })}
       <Chip label="pollers" health={Object.keys(buildPollers).length ? "ok" : "down"} detail={Object.entries(buildPollers).map(([b, n]) => `${b}×${n}`).join(" ")} />
+      {(status?.coreQueues ?? []).map((q) => (
+        <Chip key={q.taskQueue} label={q.taskQueue.replace("bulkwire-", "")} health={q.pollers.length ? (q.overrideRps ? "degraded" : "ok") : "down"}
+          detail={`${q.effectiveRps}/s${q.overrideRps ? ` (override; routing.yaml ${q.configuredRps})` : ""} · ${q.pollers.length} pollers`} />
+      ))}
       <Chip label="Core Lakeshore" health={core("lakeshore")} detail={coreDetail("lakeshore")} />
       <Chip label="Core Prairie" health={core("prairie")} detail={coreDetail("prairie")} />
       <Chip label="SQL Lakeshore" health={containerHealth(cs.get("sql-lakeshore"))} />

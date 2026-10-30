@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"bulkwire/internal/claimcheck"
+	"bulkwire/internal/config"
 	"bulkwire/internal/model"
 )
 
@@ -292,5 +293,68 @@ func TestMissingStagedDataIsNotFound(t *testing.T) {
 	_, err := ReadManifest(context.Background(), claimcheck.NewMemory(), "lakeshore", "nope")
 	if !errors.Is(err, claimcheck.ErrNotFound) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// Chunk size has no floor: size 1 makes one chunk per row, and a size larger than the largest group makes one
+// chunk per group. ChunkCount always agrees with Plan.
+func TestPlanAtChunkSizeOneAndLargerThanAnyGroup(t *testing.T) {
+	m := model.Manifest{Groups: []model.GroupInfo{
+		{GroupKey: "a|d", StartOffset: 0, RowCount: 3},
+		{GroupKey: "b|d", StartOffset: 3, RowCount: 2},
+	}}
+	one, err := Plan(m, 1)
+	if err != nil || len(one) != 5 || ChunkCount(m.Groups, 1) != 5 {
+		t.Fatalf("size 1: %d chunks, %v", len(one), err)
+	}
+	for i, c := range one {
+		if c.Length != 1 || c.Offset != i {
+			t.Fatalf("size 1 chunk %d: %+v", i, c)
+		}
+	}
+	if one[2].ChunkID != "g00-c02" || one[3].ChunkID != "g01-c00" {
+		t.Fatalf("chunks must not span groups: %+v", one)
+	}
+	big, err := Plan(m, 1000)
+	if err != nil || len(big) != 2 || big[0].Length != 3 || big[1].Length != 2 || ChunkCount(m.Groups, 1000) != 2 {
+		t.Fatalf("size larger than any group: %+v, %v", big, err)
+	}
+}
+
+// The history guard's arithmetic: 10,000 rows (four groups of 2,500) at chunk size 10 plan 1,000 chunks, within
+// the measured default MAX_CHUNKS_PER_BATCH (1,300), so staging accepts it; at chunk size 1 they need 10,000
+// chunks and staging marks the batch INVALID with a batch-level TOO_MANY_CHUNKS error.
+func TestChunkLimitAtStaging(t *testing.T) {
+	m := model.Manifest{}
+	for g := range 4 {
+		m.Groups = append(m.Groups, model.GroupInfo{GroupKey: fmt.Sprintf("acct%d|d", g), StartOffset: g * 2500, RowCount: 2500})
+	}
+	chunks, _ := Plan(m, 10)
+	if len(chunks) != 1000 || len(chunks) > config.MaxChunksPerBatchDefault {
+		t.Fatalf("10,000 rows at size 10: %d chunks (limit %d)", len(chunks), config.MaxChunksPerBatchDefault)
+	}
+	if ChunkCount(m.Groups, 1) <= config.MaxChunksPerBatchDefault {
+		t.Fatal("10,000 rows at size 1 must exceed the limit")
+	}
+
+	var b strings.Builder
+	b.WriteString(strings.Join(Header, ",") + "\n")
+	for i := 1; i <= 10000; i++ {
+		fmt.Fprintf(&b, "4401220017,2026-11-03,1.00,USD,Payee %d,12345678,021000021,,,\n", i)
+	}
+	stage := func(size int) model.Manifest {
+		m, err := Stage(context.Background(), claimcheck.NewMemory(), activeCore, Input{BatchID: "01JG", FiID: "lakeshore",
+			CustomerID: "c", Data: []byte(b.String()), UploadedAt: today, MaxRows: 10000, PageSize: 500,
+			ChunkSize: size, MaxChunks: config.MaxChunksPerBatchDefault})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	if m := stage(10); m.Status != model.StagingValid || m.BatchError != "" {
+		t.Fatalf("size 10 must stage VALID: %s %q", m.Status, m.BatchError)
+	}
+	if m := stage(1); m.Status != model.StagingInvalid || !strings.Contains(m.BatchError, "needs 10000 chunks") || m.ErrorCount != 1 {
+		t.Fatalf("size 1 must stage INVALID with the reason: %s %q (%d errors)", m.Status, m.BatchError, m.ErrorCount)
 	}
 }

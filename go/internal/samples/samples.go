@@ -112,6 +112,14 @@ var specs = []spec{
 		},
 	},
 	{
+		info: Info{Name: "northline-bonus-500", FiID: "lakeshore", CustomerID: "northline-medical", Rows: 500,
+			Description: "Northline Medical bonus run: 500 wires in one group, ≈ $1.4M (the small batch in the Fairness comparison)"},
+		seed: 500, kind: payrollFile,
+		groups: []group{
+			{northPay, 1, 500, 60_000, 480_000},
+		},
+	},
+	{
 		info: Info{Name: "harvest-2000", FiID: "prairie", CustomerID: "harvest-coop", Rows: 2000,
 			Description: "Harvest Growers Co-op: 2,000 wires, ≈ $4.8M (second tenant; dual control applies)"},
 		seed: 2000, kind: payrollFile,

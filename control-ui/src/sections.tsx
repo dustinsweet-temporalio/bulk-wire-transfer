@@ -1,9 +1,9 @@
 // The Control Center's sections. Every action calls control-service; nothing here talks to a bank system directly.
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { FIS, PORTAL, TEMPORAL_UI, get, post, put, type BatchRow, type Defaults, type CoreStats, type Status } from "./api";
+import { FIS, PORTAL, TEMPORAL_UI, get, post, put, type BatchRow, type CoreQueue, type Defaults, type CoreStats, type Status } from "./api";
 import { catalog, type Category, type Entry } from "./catalog";
-import { countdowns, onCountdown, PAYROLL_DAY, runAction } from "./actions";
+import { countdowns, onCountdown, FAIRNESS_TEST, PAYROLL_DAY, runAction } from "./actions";
 import { Act, bytes, Card, LineChart, Sparkline } from "./components";
 
 const ACCENT = { core: "#F2A65A", db: "#E07A9B", workers: "#8FA8FF", temporal: "#B79CFF", claim: "#7CC4FF", approvals: "#9BE08A", load: "#FFD166", security: "#C3A6FF" };
@@ -142,7 +142,7 @@ export function CatalogSection() {
   );
 }
 
-// ---- 4. Core load & fairness ---------------------------------------------------------------------------------
+// ---- 4. Core load & queues ----------------------------------------------------------------------------------
 type Sample = { inFlight: number; cps: number; fps: number; max: number };
 
 export function Load() {
@@ -160,34 +160,28 @@ export function Load() {
     },
     refetchInterval: 1000,
   });
-  const fairness = useQuery({ queryKey: ["fairness"], queryFn: () => get<{ enabled: boolean; rpsPerFi: number }>("/fairness"), refetchInterval: 3000 });
-  const [rps, setRps] = useState(3);
+  const queues = useQuery({ queryKey: ["ratelimits"], queryFn: () => get<CoreQueue[]>("/ratelimits"), refetchInterval: 3000 });
+  const queueOf = (fi: string) => queues.data?.find((q) => q.fis.includes(fi));
   const [storm, setStorm] = useState<unknown>(null);
   const [launch, setLaunch] = useState<unknown>(null);
   const [concurrency, setConcurrency] = useState(4);
   return (
     <div className="stack">
-      <h2>Core load & fairness</h2>
-      <Card title="Per-FI fairness rate limit (Activity task queue)" accent={ACCENT.load}
-        actions={<span className={`pill ${fairness.data?.enabled ? "warn" : "muted"}`}>{fairness.data?.enabled ? `ON · ${fairness.data.rpsPerFi}/s per FI` : "OFF"}</span>}>
-        <p className="explain">Caps Core call <b>rate</b> per FI across every batch and worker. Steady-state in-flight ≈ rate × call latency. Enforced by the Temporal Service.</p>
-        <div className="row wrap">
-          <label>rps per FI <input type="number" min={0.5} step={0.5} value={rps} onChange={(e) => setRps(Number(e.target.value))} style={{ width: 80 }} /></label>
-          <Act label="Enable limit" tone="primary" run={() => put("/fairness", { enabled: true, rpsPerFi: rps }).then(() => fairness.refetch())} />
-          <Act label="Remove limit" run={() => put("/fairness", { enabled: false, rpsPerFi: 0 }).then(() => fairness.refetch())} />
-        </div>
-      </Card>
+      <h2>Core load & queues</h2>
+      <p className="explain">Each FI's Core Activities run on that FI's own task queue. Its rate limit caps how fast Core calls <b>start</b> (steady-state in-flight ≈ rate × call latency); the number in flight is bounded by each batch's concurrency and each worker's cap. Within a queue, Fairness is keyed by batch ID, so when the queue backs up the Temporal Service takes turns across that FI's batches.</p>
       <div className="cards two">
         {FIS.map((fi) => {
           const h = history.current[fi] ?? [];
           const st = stats.data?.[fi] as CoreStats | undefined;
+          const q = queueOf(fi);
           return (
             <Card key={fi} title={`Core ${fi}`} accent={ACCENT.core} actions={<><LatencyControl fi={fi} /><Act label="reset stats" run={() => post(`/core/${fi}/stats/reset`)} /></>}>
+              <QueueLimit fi={fi} q={q} refetch={() => queues.refetch()} />
               <LineChart series={[
                 { name: "calls/s", color: "#FFD166", values: h.map((x) => x.cps) },
                 { name: "in-flight", color: "#8FA8FF", values: h.map((x) => x.inFlight) },
                 { name: "failures/s", color: "#FF7A7A", values: h.map((x) => x.fps) },
-              ]} max={fairness.data?.enabled ? fairness.data.rpsPerFi : undefined} />
+              ]} max={q?.effectiveRps} />
               <p className="muted small">max in-flight {st?.maxInFlight ?? 0} · total {st?.callsTotal ?? 0} · failed {st?.callsFailed ?? 0} · 10 s avg {st?.callsPerSecond?.last10s ?? 0}/s</p>
             </Card>
           );
@@ -201,11 +195,39 @@ export function Load() {
         </div>
         {launch ? <pre>{JSON.stringify(launch, null, 2)}</pre> : null}
       </Card>
+      <Card title="Fairness comparison (F48)" accent={ACCENT.load}>
+        <p className="muted">Three 5,000-wire Summit batches at Lakeshore, then a 500-wire Northline batch 3 s later. Set Lakeshore's queue to 2/s first so the queue backs up; Fairness only changes anything when there is a backlog.</p>
+        <div className="row wrap">
+          <Act label="Lakeshore queue 2/s" run={() => put("/ratelimits/lakeshore", { rps: 2 }).then(() => queues.refetch())} />
+          <Act label="Launch comparison" tone="primary" run={async () => setLaunch(await post("/load/payroll-day", { batches: FAIRNESS_TEST }))} />
+        </div>
+      </Card>
       <Card title="Retry storm (F35)" accent={ACCENT.load}>
         <p className="muted">20 concurrent Draft requests for one freshly staged Lakeshore batch, each with a different Idempotency-Key.</p>
         <Act label="Fire retry storm" tone="primary" run={async () => setStorm(await post("/load/retry-storm", { fiId: "lakeshore", userId: "jordan", requests: 20 }))} />
         {storm ? <pre>{JSON.stringify(storm, null, 2)}</pre> : null}
       </Card>
+    </div>
+  );
+}
+
+// DEMO-ONLY: override one FI's Core queue rate limit (UpdateTaskQueueConfig, like `make ratelimit`), or clear the
+// override so the queue returns to the rate its workers set from routing.yaml.
+function QueueLimit({ fi, q, refetch }: { fi: string; q?: CoreQueue; refetch: () => void }) {
+  const [rps, setRps] = useState(2);
+  if (!q) return <p className="muted small">Core queue: loading…</p>;
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <p className="small">
+        <span className="mono">{q.taskQueue}</span> · routing.yaml <b>{q.configuredRps}/s</b>, cap {q.maxConcurrentActivities} per worker ·{" "}
+        override <b>{q.overrideRps != null ? `${q.overrideRps}/s` : "none"}</b> · enforced <b>{q.effectiveRps}/s</b> ({q.effectiveSource || "?"}) · {q.pollers.length} pollers
+        {q.error ? <span className="pill warn"> {q.error}</span> : null}
+      </p>
+      <div className="row wrap">
+        <label className="small">rps <input type="number" min={0.5} step={0.5} value={rps} onChange={(e) => setRps(Number(e.target.value))} style={{ width: 70 }} /></label>
+        <Act label="Set override" run={() => put(`/ratelimits/${fi}`, { rps }).then(refetch)} />
+        <Act label="Clear override" run={() => put(`/ratelimits/${fi}`, { rps: null }).then(refetch)} />
+      </div>
     </div>
   );
 }
@@ -244,6 +266,7 @@ function DefaultsCard({ fi }: { fi: string }) {
       <div className="form">
         {field("chunkSize", "number")}{field("concurrency", "number")}{field("approvalWindow", "text")}{field("retryBudget", "text")}{field("retryMaxInterval", "text")}
       </div>
+      <p className="muted small">chunkSize 1–10,000 (default 250; no floor, but a batch needing more than MAX_CHUNKS_PER_BATCH = 1,300 chunks is rejected at staging) · concurrency 1–8 (default 4, from routing.yaml)</p>
       <Act label="Save" tone="primary" run={() => put(`/draft-defaults/${fi}`, form).then(() => q.refetch())} />
     </Card>
   );

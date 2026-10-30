@@ -44,12 +44,36 @@ type ClaimCheck struct {
 // Defaults are the per-batch settings copied into a workflow's input when it starts.
 type Defaults struct {
 	ChunkSize        int
-	Concurrency      int
+	Concurrency      int // per-FI values in config/routing.yaml (fiDefaults) take precedence
 	MaxRows          int
+	MaxChunks        int // maxChunksPerBatch: the history guard (see MaxChunksPerBatchDefault)
 	ApprovalWindow   time.Duration
 	RetryBudget      time.Duration
 	RetryMaxInterval time.Duration
 }
+
+// MaxChunksPerBatchDefault keeps one batch's workflow history far below Temporal's limits (51,200 events and
+// 50 MB per history; the Service warns at 10,240 events). Chunk size has no artificial floor, so a small chunk
+// size on a large batch is where the event count comes from.
+//
+// Measured from go/testdata/histories/scenario-a-outage.json (a 23-chunk, 6-group batch, drafted and
+// authorized, through a Core outage): 324 events. 57 Activities x 3 events (scheduled, started, completed)
+// = 171; 47 Workflow Tasks x 3 events = 141; 12 others (start, 2 Updates x 2, approval timer x 2,
+// 4 Search Attribute upserts, completion). Retries add no events: only an Activity's final attempt is recorded.
+//
+// Upper-bound model (one Workflow Task per Activity completion, i.e. no batching of completions):
+//   - each Activity  = 3 events + at most 3 Workflow Task events = 6
+//   - each chunk     = 2 Activities (draft, authorize)            = 12
+//   - each group     = 1 policy Activity                         = 6
+//   - per batch      = 5 Activities (plan, Core batch, 3 statuses) = 30, plus the 12 others = 42
+//
+// Check against the measurement: 42 + 6x6 + 12x23 = 354 >= 324 (the model is an upper bound).
+// Worst case for groups is one chunk per group: 42 + 18 x chunks < 25,000 -> chunks <= 1,386.
+// Default 1,300: draft + authorization stay under 25,000 events (23,442 at the worst case) even with every
+// chunk in its own group, leaving more than half the 51,200-event limit for park/resolve cycles.
+// A typical batch (a handful of groups) at 1,300 chunks is about 15,700 events.
+// (The 2,000 in-flight Activity limit is not a constraint: chunk concurrency is at most 8.)
+const MaxChunksPerBatchDefault = 1300
 
 // Core is how Go services reach each FI's own Core.
 type Core struct {
@@ -82,6 +106,7 @@ type Config struct {
 	ClaimCheck     ClaimCheck
 	Defaults       Defaults
 	Core           Core
+	RoutingPath    string // config/routing.yaml: Core task queue per FI (internal/routing)
 	KeyringPath    string
 	CORSOrigins    []string
 	AuthSigningKey string
@@ -116,8 +141,9 @@ func Load() (Config, error) {
 		},
 		Defaults: Defaults{
 			ChunkSize:        r.integer("DEFAULT_CHUNK_SIZE", 250),
-			Concurrency:      r.integer("DEFAULT_CONCURRENCY", 2),
+			Concurrency:      r.integer("DEFAULT_CONCURRENCY", 4),
 			MaxRows:          r.integer("MAX_ROWS", 10000),
+			MaxChunks:        r.integer("MAX_CHUNKS_PER_BATCH", MaxChunksPerBatchDefault),
 			ApprovalWindow:   r.duration("APPROVAL_WINDOW", 24*time.Hour),
 			RetryBudget:      r.duration("CORE_RETRY_BUDGET", 30*time.Minute),
 			RetryMaxInterval: r.duration("CORE_RETRY_MAX_INTERVAL", 20*time.Second),
@@ -127,6 +153,7 @@ func Load() (Config, error) {
 			InternalTokens:        r.pairs("INTERNAL_TOKENS", "fiId=token"),
 			AlertAttemptThreshold: r.integer("CORE_RETRY_ALERT_THRESHOLD", 5),
 		},
+		RoutingPath:    r.str("ROUTING_CONFIG_PATH", "/config/routing.yaml"),
 		KeyringPath:    r.str("CODEC_KEYRING_PATH", "/config/keyring.json"),
 		CORSOrigins:    r.list("CODEC_CORS_ORIGINS", "http://localhost:8233"),
 		AuthSigningKey: r.str("AUTH_SIGNING_KEY", ""),

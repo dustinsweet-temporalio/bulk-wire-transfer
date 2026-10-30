@@ -29,6 +29,7 @@ const (
 	CodeLength             = "LENGTH"
 	CodeOriginatingAccount = "ORIGINATING_ACCOUNT"
 	CodeFile               = "FILE"
+	CodeTooManyChunks      = "TOO_MANY_CHUNKS" // batch-level (row 0): the history guard, see ChunkLimitMessage
 )
 
 // MaxAmountCents is $9,999,999.99.

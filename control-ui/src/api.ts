@@ -35,6 +35,22 @@ export interface Status {
   claimCheck?: { backend: string; reachable: boolean };
   activeKeyId?: string;
   draftDefaults?: Record<string, Defaults>;
+  coreQueues?: CoreQueue[];
+}
+
+// One FI's Core Activity task queue: the rate its workers set from routing.yaml, any server-side override, and what
+// the Temporal Service enforces now.
+export interface CoreQueue {
+  taskQueue: string;
+  fis: string[];
+  configuredRps: number;
+  maxConcurrentActivities: number;
+  overrideRps?: number;
+  overrideReason?: string;
+  effectiveRps: number;
+  effectiveSource: string;
+  pollers: string[];
+  error?: string;
 }
 
 export interface CoreState {

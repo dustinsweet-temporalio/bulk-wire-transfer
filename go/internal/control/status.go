@@ -68,6 +68,9 @@ func (s *Service) status(w http.ResponseWriter, r *http.Request) {
 		set("pollers", pollers)
 	})
 	run(func(ctx context.Context) {
+		set("coreQueues", s.coreQueues(ctx)) // configured rate, any override, effective rate, pollers
+	})
+	run(func(ctx context.Context) {
 		desc, err := s.Temporal.WorkerDeploymentClient().GetHandle(s.Cfg.Temporal.DeploymentName).Describe(ctx, client.WorkerDeploymentDescribeOptions{})
 		d := map[string]any{"name": s.Cfg.Temporal.DeploymentName}
 		if err == nil {

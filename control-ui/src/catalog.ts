@@ -1,4 +1,4 @@
-// Failure catalog content: every failure condition F01–F44 the demo can show (docs/FAILURE-CATALOG.md is generated
+// Failure catalog content: every failure condition F01–F49 the demo can show (docs/FAILURE-CATALOG.md is generated
 // from this file). Each card: trigger action(s), what you'll see, what handles it (Temporal primitive + link), and
 // one sentence to say.
 import type { FI } from "./api";
@@ -14,7 +14,8 @@ export type Action =
   | { kind: "expire"; label: string }
   | { kind: "retryStorm"; label: string }
   | { kind: "payrollDay"; label: string }
-  | { kind: "fairness"; rpsPerFi: number; label: string }
+  | { kind: "ratelimit"; fi: FI; rps: number | null; label: string }
+  | { kind: "fairnessTest"; label: string }
   | { kind: "rotate"; label: string }
   | { kind: "goto"; section: string; label: string }
   | { kind: "link"; href: string; label: string };
@@ -33,6 +34,9 @@ export interface Entry {
 }
 
 export type Category = "Core" | "Database" | "Workers" | "Temporal & claim check" | "API & approvals plumbing" | "Business conditions" | "Approvals" | "Duplicates, load & tenancy" | "Deployments, security, observability";
+
+// F48's measured outcome: two runs each way on the demo stack (Lakeshore queue at 2/s, 600 ms Core latency).
+const FAIRNESS_SEE = "With Lakeshore's queue at 2/s, the three 5,000-wire batches keep about 12 Core Activities waiting (4 each, the per-batch semaphore). The 500-wire Northline batch, started 3 s later, reaches Awaiting approval in about 9 s (measured: 9.0 s and 9.2 s); the large batches take about 47 s. For comparison, with every Lakeshore batch on one fairness key (so first come, first served among them) the small batch took 22.5 s in both runs and the large ones were unchanged. Fairness changes only how long the small batch waits behind tasks already queued; it does not make the queue faster, and with no backlog it changes nothing.";
 
 const L3001 = "http://localhost:3001";
 const L3002 = "http://localhost:3002";
@@ -95,7 +99,7 @@ export const catalog: Entry[] = [
     say: "Slow is not broken: timeouts are sized to Core, so a slow core just takes longer." },
   { id: "F08", category: "Core", title: "One FI's Core down, other FI busy", trigger: "Outage on Lakeshore while a Prairie batch drafts",
     actions: [{ kind: "fault", fi: "lakeshore", mode: "outage", durationSeconds: 120, label: "Outage 120 s (Lakeshore)" }, { kind: "link", href: `${L3002}/payments/bulk-wire`, label: "Prairie portal: upload harvest-2000" }],
-    see: "The Prairie batch is unaffected; Lakeshore retries.", handled: "One Core per FI; tenant context in workflow input", link: D.fairness,
+    see: "The Prairie batch is unaffected; Lakeshore retries.", handled: "One Core per FI, each with its own Core task queue; tenant context in workflow input", link: D.fairness,
     say: "Each FI has its own Core and the FI travels in the workflow input, so one bank's outage never touches another's." },
   // ---- Core database, per FI ----
   { id: "F09", category: "Database", title: "Database down", trigger: "Containers → stop sql-lakeshore 60 s → start",
@@ -212,11 +216,11 @@ export const catalog: Entry[] = [
     actions: [{ kind: "retryStorm", label: "Fire 20 drafts" }],
     see: "20 responses, 1 execution.", handled: "Business Workflow ID", link: D.wfid,
     say: "Twenty requests with twenty different keys still produce exactly one workflow." },
-  { id: "F36", category: "Duplicates, load & tenancy", title: "Payroll day, two users at one FI", trigger: "Load → Payroll day; then enable the per-FI rate limit",
-    actions: [{ kind: "payrollDay", label: "Launch payroll day" }, { kind: "fairness", rpsPerFi: 3, label: "Enable 3/s per FI" }, { kind: "fairness", rpsPerFi: 0, label: "Remove limit" }],
-    see: "Without the limit, Lakeshore Core calls/s and in-flight rise with each batch. With it, Lakeshore is capped at the set rate regardless of batch count; both Lakeshore batches keep progressing; Prairie runs on its own allowance, not queued behind Lakeshore. The batches finish in seconds without the limit, so launch once without it and once with it.",
-    handled: "Fairness key = FI + per-key rate limit, enforced by the Temporal Service", link: D.fairness,
-    say: "The cap is per bank and enforced by Temporal, across every batch and every worker." },
+  { id: "F36", category: "Duplicates, load & tenancy", title: "Payroll day, two users at one FI", trigger: "Load → Payroll day; then rate-limit Lakeshore's Core queue",
+    actions: [{ kind: "payrollDay", label: "Launch payroll day" }, { kind: "ratelimit", fi: "lakeshore", rps: 3, label: "Lakeshore queue 3/s" }, { kind: "ratelimit", fi: "lakeshore", rps: null, label: "Clear override" }],
+    see: "Without an override each Core queue runs at its routing.yaml rate (10/s): Lakeshore calls/s rise as both Lakeshore batches run. With Lakeshore's queue at 3/s, Lakeshore calls flatten at about 3/s and both Lakeshore batches keep progressing; Prairie's queue is separate, so Prairie is unaffected. The batches finish in seconds at 10/s, so launch once without the override and once with it.",
+    handled: "A Core task queue per FI, each with its own rate limit enforced by the Temporal Service", link: D.fairness,
+    say: "Each bank's Core has its own queue and its own cap, enforced by Temporal across every batch and every worker." },
   { id: "F37", category: "Duplicates, load & tenancy", title: "Concurrency is a setting", trigger: "Draft defaults concurrency 1, then 4",
     actions: [{ kind: "defaults", fi: "lakeshore", patch: { concurrency: 1 }, label: "Lakeshore concurrency 1" }, { kind: "defaults", fi: "lakeshore", patch: { concurrency: 4 }, label: "Lakeshore concurrency 4" }],
     see: "Core max in-flight 1 vs 4 (latency is fixed; real gains must be measured).", handled: "Semaphore", link: D.semaphore,
@@ -251,4 +255,30 @@ export const catalog: Entry[] = [
     narrated: "temporal activity pause --namespace bulkwire -w <workflowId> --activity-id <activityId>   (then: temporal activity unpause …). Takes effect after the current attempt: these Activities do not heartbeat.",
     see: "Retries stop until unpaused (effective after the current attempt; no heartbeats).", handled: "Activity Operations", link: D.activityOps,
     say: "An operator can pause one Activity's retries without touching the rest of the batch." },
+  // ---- Core task queue per FI ----
+  { id: "F45", category: "Duplicates, load & tenancy", title: "One FI's Core queue rate limited", trigger: "Lakeshore queue 2/s; draft one batch at each FI",
+    actions: [{ kind: "ratelimit", fi: "lakeshore", rps: 2, label: "Lakeshore queue 2/s" }, { kind: "link", href: L3001, label: "Lakeshore portal" }, { kind: "link", href: L3002, label: "Prairie portal" }, { kind: "ratelimit", fi: "lakeshore", rps: null, label: "Clear override" }],
+    see: "Core load & queues: Lakeshore's queue shows override 2/s (routing.yaml 10/s) and Lakeshore calls/s stay at about 2; its batch is slower. Prairie's queue is still at 10/s and its batch runs at normal speed. Clearing the override returns Lakeshore to 10/s without a deployment.",
+    handled: "Task queue rate limit (UpdateTaskQueueConfig; also `make ratelimit FI=lakeshore RPS=2`)", link: D.fairness,
+    say: "Throttling one bank's Core is a server-side setting on that bank's queue; nobody else slows down." },
+  { id: "F46", category: "Workers", title: "Core-queue workers for one FI stopped", trigger: "Narrated", actions: [],
+    narrated: "In this demo both worker processes poll every queue, so one FI's Core workers cannot be stopped alone (per-FI Core worker containers are the production shape; see docs/ARCHITECTURE.md, Task queues and Core load). Evidence: `make test-integration` runs a real dev server with no poller on bulkwire-core-lakeshore: the Prairie batch completes, the Lakeshore batch waits with EnsureGenTxBatch SCHEDULED, and completes once a Lakeshore Core worker starts.",
+    see: "That FI's Core Activities wait in its queue (scheduled, no attempt started); the other FI keeps running. If the workers stay away longer than the retry budget (30 min), ScheduleToClose parks the step and RETRY resumes it.",
+    handled: "A Core task queue per FI; the retry budget (ScheduleToClose) bounds the wait", link: D.wallTime,
+    say: "With no workers for one bank's Core, that bank's work simply waits in its queue; the other bank never notices." },
+  { id: "F47", category: "Workers", title: "Core Activity on the wrong FI's queue", trigger: "Narrated", actions: [],
+    narrated: "Evidence: `make test-go`. TestCoreActivityOnTheWrongFIsQueueParks: a worker for bulkwire-core-prairie refuses every Lakeshore Core Activity with the non-retryable WrongFiRouting error, before any call to Core. Workflow test W20: the chunk parks (WRONG_FI_ROUTING, source ROUTING) and RETRY after the fix completes it. It needs bulkwire-service and the workers to disagree about routing.yaml; startup validation rejects a file that maps an FI to zero or two queues.",
+    see: "The chunk parks with WRONG_FI_ROUTING naming the FI and the queue (no account numbers); nothing reaches another FI's Core.",
+    handled: "Non-retryable error type parks the chunk (Resumable Activity)", link: D.resumable,
+    say: "A worker only holds credentials for its own bank's Core, so a routing mistake parks the chunk instead of touching the wrong bank." },
+  { id: "F48", category: "Duplicates, load & tenancy", title: "Large and small batch at one FI (Fairness)", trigger: "Lakeshore queue 2/s; Load → Fairness comparison",
+    actions: [{ kind: "ratelimit", fi: "lakeshore", rps: 2, label: "Lakeshore queue 2/s" }, { kind: "fairnessTest", label: "Launch comparison" }, { kind: "ratelimit", fi: "lakeshore", rps: null, label: "Clear override" }],
+    see: FAIRNESS_SEE,
+    handled: "Fairness keyed by batch ID on the FI's Core queue; the per-batch semaphore", link: D.fairness,
+    say: "When one bank's queue is backed up, Temporal takes turns across that bank's batches, so a small batch is not stuck behind the big ones." },
+  { id: "F49", category: "Business conditions", title: "Batch exceeds maxChunksPerBatch", trigger: "Lakeshore chunk size 1; upload summit-payroll-5000",
+    actions: [{ kind: "defaults", fi: "lakeshore", patch: { chunkSize: 1 }, label: "Lakeshore chunk size 1" }, { kind: "link", href: L3001, label: "Lakeshore portal" }, { kind: "defaults", fi: "lakeshore", patch: { chunkSize: 250 }, label: "Restore 250" }],
+    see: "The review screen says the file needs 5,000 chunks at chunk size 1 and one batch can have at most 1,300; Save as draft and Approve are unavailable. A batch staged at 250 and drafted after the change gets the same message as a 409 at Draft (BATCH_TOO_MANY_CHUNKS); if the change comes between an approval and Core's callback, Core shows the notification as failed and bulkwire-service logs it at ERROR.",
+    handled: "History guard (MAX_CHUNKS_PER_BATCH) before any workflow starts", link: D.claimCheck,
+    say: "Chunk size has no floor, so the limit is on chunk count: a batch that would outgrow one workflow history is refused before it starts." },
 ];

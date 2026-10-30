@@ -1,0 +1,44 @@
+# Core Activity routing: which task queue carries each FI's Core-calling Activities, and that queue's limits.
+#
+# Read at startup by bulkwire-service (to resolve a batch's Core queue and fairness key when its workflow
+# starts), by every worker (to poll each queue with the right limits and only that queue's Core credentials),
+# and by control-service and `make ratelimit` (to find an FI's queue). Core URLs and service tokens are NOT
+# here; they stay in CORE_ENDPOINTS / INTERNAL_TOKENS, keyed by FI.
+#
+# The workflow itself and the claim-check-only Activity (PlanChunks) stay on the shared task queue
+# (TEMPORAL_TASK_QUEUE, "bulkwire").
+#
+# WHY these demo values. Each Core call (one chunk, one stored-procedure call) takes about 0.6 s with the demo's
+# simulated processing time, and each batch keeps at most 4 chunks in flight (chunk concurrency below).
+#   - activitiesPerSecond 10: the Temporal Service starts at most 10 Core Activities per second on this queue,
+#     across all of the FI's batches and all workers. At 0.6 s per call that is about 6 calls in flight at
+#     steady state: room for a payroll day's two or three concurrent batches, and a hard ceiling well below
+#     what a single SQL Server handles. It caps how fast calls START, not how many run at once.
+#   - maxConcurrentActivities 8: each worker process runs at most 8 of this queue's Activities at once. The
+#     demo runs two worker processes, so at most 16 per FI. This protects the worker; the per-batch semaphore
+#     and the rate limit above are what protect Core.
+# Override the rate limit without a deployment: `make ratelimit FI=lakeshore RPS=2` (see docs/ARCHITECTURE.md).
+coreQueues:
+  bulkwire-core-lakeshore:
+    fis: [lakeshore]
+    activitiesPerSecond: 10
+    maxConcurrentActivities: 8
+  bulkwire-core-prairie:
+    fis: [prairie]
+    activitiesPerSecond: 10
+    maxConcurrentActivities: 8
+
+  # Several FIs whose Cores share one database cluster can share one queue, so the queue's rate limit protects
+  # the cluster they share. On a shared queue the fairness key is the FI (not the batch), so one FI's batches
+  # cannot crowd out another's. Every FI must appear in exactly one queue.
+  # bulkwire-core-shared-cluster-1:
+  #   fis: [fiA, fiB]
+  #   activitiesPerSecond: 10
+  #   maxConcurrentActivities: 8
+
+# Per-FI chunk concurrency: how many chunk Activities one batch keeps in flight. Copied into the workflow input
+# when a batch starts; an FI not listed here uses DEFAULT_CONCURRENCY (4). The Control Center can change it
+# for the next batch (DEMO-ONLY draft defaults).
+fiDefaults:
+  lakeshore: { chunkConcurrency: 4 }
+  prairie: { chunkConcurrency: 4 }
